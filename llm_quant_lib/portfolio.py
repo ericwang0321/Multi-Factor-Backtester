@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 from collections import defaultdict
+from typing import Dict, List, Optional # <--- 【修正】添加这行导入语句
 
 class Portfolio:
     """
@@ -13,14 +14,14 @@ class Portfolio:
         初始化投资组合。
 
         Args:
-            open_prices (pd.DataFrame): 开盘价 (datetime x sec_code)。确保只包含回测资產池的代码。
-            close_prices (pd.DataFrame): 收盘价 (datetime x sec_code)。确保只包含回测资產池的代码。
+            open_prices (pd.DataFrame): 开盘价 (datetime x sec_code)。确保只包含回测资产池的代码。
+            close_prices (pd.DataFrame): 收盘价 (datetime x sec_code)。确保只包含回测资产池的代码。
             initial_capital (float): 初始资金。
             commission_rate (float): 手续费率 (例如 0.001)。
             slippage (float): 滑点率 (例如 0.0005)。
         """
         if not isinstance(open_prices.index, pd.DatetimeIndex) or not isinstance(close_prices.index, pd.DatetimeIndex):
-             raise ValueError("价格数据的索引必须是 DatetimeIndex。")
+            raise ValueError("价格数据的索引必须是 DatetimeIndex。")
 
         self.open_prices = open_prices
         self.close_prices = close_prices
@@ -31,23 +32,23 @@ class Portfolio:
 
         self.cash = initial_capital
         # {sec_code: shares} 持有股数, 只存储 > 0 的仓位
-        self.current_positions: Dict[str, float] = defaultdict(float)
+        self.current_positions: Dict[str, float] = defaultdict(float) # 【修正】使用导入的 Dict
         # 记录每日总净值 {'datetime': date, 'total_value': value}
-        self.portfolio_history: List[Dict] = []
+        self.portfolio_history: List[Dict] = [] # 【修正】使用导入的 List 和 Dict
         # 记录每次调仓后的持仓详情 {'datetime': date, 'sec_code': code, 'shares': shares, 'price': price, 'value': value, 'weight': weight}
-        self.holdings_history: List[Dict] = []
+        self.holdings_history: List[Dict] = [] # 【修正】使用导入的 List 和 Dict
         # 记录每次调仓的换手率 (min(buy_value, sell_value) / portfolio_value_before_trade)
-        self.turnover_history: List[float] = []
+        self.turnover_history: List[float] = [] # 【修正】使用导入的 List
 
         # 记录第一天的初始状态
         if not self.open_prices.empty:
-             self.portfolio_history.append({'datetime': self.open_prices.index[0], 'total_value': initial_capital})
+            self.portfolio_history.append({'datetime': self.open_prices.index[0], 'total_value': initial_capital})
 
 
     def get_current_value(self, date: pd.Timestamp) -> float:
-        """获取指定日期收盘后的总市值 (持仓市值 + 現金)"""
+        """获取指定日期收盘后的总市值 (持仓市值 + 现金)"""
         market_value = 0.0
-        # 确保日期在價格數據的索引中
+        # 确保日期在价格数据的索引中
         if date in self.close_prices.index:
             # 获取当天的收盘价 Series
             prices_today = self.close_prices.loc[date]
@@ -55,7 +56,7 @@ class Portfolio:
                 # 确保该证券当在价格 Series 中且价格有效
                 if sec in prices_today.index and pd.notna(prices_today[sec]) and prices_today[sec] > 0:
                     market_value += shares * prices_today[sec]
-                # else: # 如果找不到價格，假设其价值为0 （更保守）
+                # else: # 如果找不到价格，假设其价值为0 （更保守）
                 #     print(f"警告: 在 {date.date()} 收盘时无法找到 {sec} 的有效价格，其市值计为0。")
         # else:
         #     # 如果日期不存在，使用最近一次记录的总价值？或者返回NaN？返回当前现金+持仓按上个交易日价格计算？
@@ -73,25 +74,26 @@ class Portfolio:
         """记录当天的投资组合总价值到历史记录"""
         # 如果日期已存在（例如步进优化时重复处理），先移除旧记录
         if self.portfolio_history and self.portfolio_history[-1]['datetime'] == date:
-             self.portfolio_history.pop()
+            self.portfolio_history.pop()
 
         total_value = self.get_current_value(date)
         self.portfolio_history.append({'datetime': date, 'total_value': total_value})
         return total_value
 
-    def rebalance(self, decision_date: pd.Timestamp, trade_date: pd.Timestamp, target_weights: Dict[str, float]):
+    # 【修正】这里仍然使用 Python 3.9+ 的 dict 语法，如果需要兼容旧版，可以用 Dict
+    def rebalance(self, decision_date: pd.Timestamp, trade_date: pd.Timestamp, target_weights: dict[str, float]):
         """
         根据策略提供的目标权重，在 trade_date 以开盘价执行调仓。
 
         Args:
-            decision_date (pd.Timestamp): 决策日期 (用于计算交易前的总资產)。
+            decision_date (pd.Timestamp): 决策日期 (用于计算交易前的总资产)。
             trade_date (pd.Timestamp): 交易日期 (用于获取开盘价并执行)。
             target_weights (dict): {sec_code: target_weight} 目标权重字典。
         """
-        # 1. 获取交易前的总资產 (基于 decision_date 的收盘价)
+        # 1. 获取交易前的总资产 (基于 decision_date 的收盘价)
         portfolio_value_before_trade = self.get_current_value(decision_date)
 
-        # 如果资產耗尽或为负，则无法交易
+        # 如果资产耗尽或为负，则无法交易
         if portfolio_value_before_trade <= 1e-8:
             print(f"信息: {decision_date.date()} 投资组合价值过低 ({portfolio_value_before_trade:.2f})，跳过调仓。")
             self.turnover_history.append(0.0) # 记录零换手率
@@ -109,22 +111,22 @@ class Portfolio:
         prices_today = self.open_prices.loc[trade_date]
 
         # 2. 计算目标持有股数
-        target_positions: Dict[str, float] = {} # {sec_code: target_shares}
+        target_positions: Dict[str, float] = {} # {sec_code: target_shares} # 【修正】使用导入的 Dict
         for sec, weight in target_weights.items():
             if weight > 1e-9: # 只处理目标权重为正的
                 target_value = portfolio_value_before_trade * weight
                 price = prices_today.get(sec, np.nan) # 使用 .get() 避免 KeyError
                 if pd.notna(price) and price > 0:
-                     # 估算买入成本（包括费用和滑点）来计算目标股数
-                     cost_per_share = price * (1 + self.commission_rate + self.slippage)
-                     target_shares = target_value / cost_per_share if cost_per_share > 0 else 0
-                     if target_shares > 0:
-                         target_positions[sec] = target_shares
+                    # 估算买入成本（包括费用和滑点）来计算目标股数
+                    cost_per_share = price * (1 + self.commission_rate + self.slippage)
+                    target_shares = target_value / cost_per_share if cost_per_share > 0 else 0
+                    if target_shares > 0:
+                        target_positions[sec] = target_shares
                 # else:
-                    # print(f"警告: 无法为 {sec} 在 {trade_date.date()} 获取有效开盘价 ({price})，无法设定买入目标。")
+                #     print(f"警告: 无法为 {sec} 在 {trade_date.date()} 获取有效开盘价 ({price})，无法设定买入目标。")
 
         # 3. 生成交易列表 (需要买入/卖出的股数)
-        trades: Dict[str, float] = defaultdict(float) # {sec_code: shares_to_trade (+buy, -sell)}
+        trades: Dict[str, float] = defaultdict(float) # {sec_code: shares_to_trade (+buy, -sell)} # 【修正】使用导入的 Dict
         # 需要卖出的：当前持有但不在目标中，或目标股数少于当前持有
         for sec, current_shares in self.current_positions.items():
             target_shares = target_positions.get(sec, 0.0)
@@ -169,7 +171,7 @@ class Portfolio:
         self._record_holdings(trade_date)
 
 
-    def _execute_trade(self, date: pd.Timestamp, sec_code: str, target_shares: float) -> tuple[float, Optional[str]]:
+    def _execute_trade(self, date: pd.Timestamp, sec_code: str, target_shares: float) -> tuple[float, Optional[str]]: # 【修正】使用导入的 Optional
         """
         执行单笔交易以达到目标股数 target_shares。
         返回 (交易的名义价值, 'buy'/'sell'/None)。
@@ -207,15 +209,15 @@ class Portfolio:
 
             # 如果实际能买的太少，就不买了
             if actual_shares_to_buy * price < 1.0: # 名义价值太低
-                 # print(f"信息: {date.date()} 现金 {self.cash:.2f} 不足以按目标买入 {shares_to_trade:.2f} 股 {sec_code} (需 {shares_to_trade * cost_per_share:.2f})，或买入量过小。")
-                 return 0.0, trade_type # 返回 'buy' 但交易额为0
+                # print(f"信息: {date.date()} 现金 {self.cash:.2f} 不足以按目标买入 {shares_to_trade:.2f} 股 {sec_code} (需 {shares_to_trade * cost_per_share:.2f})，或买入量过小。")
+                return 0.0, trade_type # 返回 'buy' 但交易额为0
 
             # 执行买入
             cost = actual_shares_to_buy * cost_per_share # 总花费
             self.cash -= cost
             self.current_positions[sec_code] = current_shares + actual_shares_to_buy # 更新持仓
             trade_nominal_value = actual_shares_to_buy * price # 记录名义价值
-            # print(f"交易: {date.date()} 买入 {actual_shares_to_buy:.2f} 股 {sec_code} @ {price:.2f}, 花费 {cost:.2f}, 剩餘现金 {self.cash:.2f}")
+            # print(f"交易: {date.date()} 买入 {actual_shares_to_buy:.2f} 股 {sec_code} @ {price:.2f}, 花费 {cost:.2f}, 剩余现金 {self.cash:.2f}")
 
         elif shares_to_trade < 0: # --- 卖出 ---
             trade_type = 'sell'
@@ -225,8 +227,8 @@ class Portfolio:
 
             # 如果实际能卖的太少，就不卖了
             if actual_shares_to_sell * price < 1.0: # 名义价值太低
-                 # print(f"信息: {date.date()} 尝试卖出 {shares_to_sell_target:.2f} 股 {sec_code}，但实际持有 {current_shares:.2f} 或卖出量过小。")
-                 return 0.0, trade_type # 返回 'sell' 但交易额为0
+                # print(f"信息: {date.date()} 尝试卖出 {shares_to_sell_target:.2f} 股 {sec_code}，但实际持有 {current_shares:.2f} 或卖出量过小。")
+                return 0.0, trade_type # 返回 'sell' 但交易额为0
 
             # 执行卖出
             proceeds_per_share = price * (1 - self.commission_rate - self.slippage) # 每股收入
@@ -234,7 +236,7 @@ class Portfolio:
             self.cash += proceeds
             self.current_positions[sec_code] = current_shares - actual_shares_to_sell # 更新持仓
             trade_nominal_value = actual_shares_to_sell * price # 记录名义价值
-            # print(f"交易: {date.date()} 卖出 {actual_shares_to_sell:.2f} 股 {sec_code} @ {price:.2f}, 收入 {proceeds:.2f}, 剩餘现金 {self.cash:.2f}")
+            # print(f"交易: {date.date()} 卖出 {actual_shares_to_sell:.2f} 股 {sec_code} @ {price:.2f}, 收入 {proceeds:.2f}, 剩余现金 {self.cash:.2f}")
 
             # 如果卖出后股数接近零，则从持仓字典中移除该键
             if self.current_positions[sec_code] < 1e-6:
@@ -243,23 +245,23 @@ class Portfolio:
         return trade_nominal_value, trade_type
 
     def _record_holdings(self, date: pd.Timestamp):
-        """记录指定日期收盘后的持仓详情 (股数, 價格, 价值, 权重)"""
+        """记录指定日期收盘后的持仓详情 (股数, 价格, 价值, 权重)"""
         current_portfolio_value = self.get_current_value(date)
         if current_portfolio_value <= 1e-8: # 如果总价值为0或负，无法计算权重
              # 仍然记录空的持仓或零价值持仓
              for sec, shares in self.current_positions.items():
-                  if shares > 1e-6:
+                 if shares > 1e-6:
                      self.holdings_history.append({
-                        'datetime': date, 'sec_code': sec, 'shares': shares,
-                        'price': 0.0, 'value': 0.0, 'weight': 0.0
+                         'datetime': date, 'sec_code': sec, 'shares': shares,
+                         'price': 0.0, 'value': 0.0, 'weight': 0.0
                      })
              return
 
         # 记录现金的权重
         cash_weight = self.cash / current_portfolio_value if current_portfolio_value > 1e-8 else 0.0
         self.holdings_history.append({
-             'datetime': date, 'sec_code': 'CASH', 'shares': self.cash,
-             'price': 1.0, 'value': self.cash, 'weight': cash_weight
+            'datetime': date, 'sec_code': 'CASH', 'shares': self.cash,
+            'price': 1.0, 'value': self.cash, 'weight': cash_weight
         })
 
         # 记录各个持仓的权重
@@ -275,15 +277,18 @@ class Portfolio:
                         'price': price, 'value': holding_value, 'weight': weight
                     })
         # else:
-            # print(f"警告: 在 {date.date()} 无法获取收盘价，当日持仓记录可能不完整。")
+        #     print(f"警告: 在 {date.date()} 无法获取收盘价，当日持仓记录可能不完整。")
 
     def get_holdings_history(self) -> pd.DataFrame:
         """返回持仓历史记录的 DataFrame"""
         return pd.DataFrame(self.holdings_history)
 
     def get_portfolio_history(self) -> pd.DataFrame:
-         """返回投资组合每日净值历史的 DataFrame"""
-         if not self.portfolio_history:
-             return pd.DataFrame(columns=['datetime', 'total_value'])
-         return pd.DataFrame(self.portfolio_history).set_index('datetime')
+        """返回投资组合每日净值历史的 DataFrame"""
+        if not self.portfolio_history:
+            return pd.DataFrame(columns=['datetime', 'total_value'])
+        # 确保返回的 DataFrame 以 datetime 为索引
+        df = pd.DataFrame(self.portfolio_history)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        return df.set_index('datetime')
 
