@@ -117,7 +117,7 @@ class LLMStrategy(BaseStrategy):
             # ---【API 调用点】---
             print("[LLMStrategy] 正在调用 DeepSeek API (via OpenAI SDK)...")
             response = self.client.chat.completions.create(
-                model="deepseek-reasoner", # 仍然使用 DeepSeek 的模型名称
+                model="deepseek-chat", # 仍然使用 DeepSeek 的模型名称
                 messages=prompt_messages,
                 response_format={"type": "json_object"},
                 temperature=0.5,
@@ -125,7 +125,7 @@ class LLMStrategy(BaseStrategy):
             )
             # 获取返回内容的方式与 OpenAI SDK 一致
             raw_output = response.choices[0].message.content
-            # print(f"[LLMStrategy] AI 原始返回: {raw_output}") # 调试时可以取消注释
+            print(f"[LLMStrategy] AI 原始返回: {raw_output}") # 调试时可以取消注释
             decision = json.loads(raw_output)
 
             # 4. 解析 AI 决策

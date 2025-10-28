@@ -30,7 +30,7 @@ paths:
 # --- 回测核心参数 ---
 backtest:
   start_date: "2017-01-01" # 默认开始日期
-  end_date: "2024-07-31"   # 默认结束日期
+  end_date: "2017-07-31"   # 默认结束日期
   initial_capital: 1000000 # 初始资金
   commission_rate: 0.001   # 手续费率
   slippage: 0.0005         # 滑点率
