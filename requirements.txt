@@ -1,0 +1,25 @@
+# Python 核心数据科学库
+pandas
+numpy
+
+# 数据库连接 (如果需要从 PostgreSQL 加载数据)
+sqlalchemy
+psycopg2-binary # 用于 PostgreSQL 数据库连接
+
+# 因子计算与时间序列处理
+xarray        # 用于多维数据处理 (因子计算中可能用到)
+bottleneck    # xarray 的可选加速依赖
+pandas-ta     # 用于快速计算技术指标 (EMA, MACD, RSI 等)
+
+# AI 模型 SDK
+deepseek      # DeepSeek AI SDK，用于调用 LLM 进行决策
+
+# 数据可视化与进度显示
+matplotlib    # 用于绘制净值曲线等图表
+tqdm          # 用于在运行时显示进度条
+
+# 统计分析
+statsmodels   # 用于计算 Alpha, Beta 等回归指标
+
+# 其他辅助库
+openpyxl      # pandas 读写 excel 文件可能需要 (虽然本项目主要是 CSV)
