@@ -1,0 +1,58 @@
+# LLM 量化回测框架 - 配置文件
+
+# --- 数据库连接 (可选, 如果需要从数据库加载) ---
+# 建议将密码等敏感信息存储在环境变量中
+database:
+  use_db: false # 设为 true 以启用数据库加载 (如果 CSV 不存在)
+  username: "intern52" # 或 ${DB_USER} 如果你想从环境变量读取
+  password: "${DB_PASSWORD}" # 强烈建议从环境变量读取!
+  host: "10.26.132.99" # 或 ${DB_HOST}
+  port: "5432" # 或 ${DB_PORT}
+  database: "datalake" # 或 ${DB_NAME}
+
+# --- 文件路径 ---
+# 路径相对于项目根目录 (包含此 config.yaml 的目录)
+paths:
+  # 输入数据
+  price_data_csv: "data/processed/price_with_simple_returns_2016_onwards.csv"
+  universe_definition: "data/reference/sec_code_category_grouped.csv"
+  # 基准文件映射 (key 是 universe 名称, value 是 processed 目录下的文件名)
+  benchmark_mapping:
+    equity_us: "spxt_index_daily_return.csv"
+    equity_global: "mxwd_index_daily_return.csv"
+    bond: "global_bond_index_daily_return.csv"
+    commodity: "bcom_index_daily_return.csv"
+    alternative: "bcom_index_daily_return.csv"
+  # 输出目录
+  plot_dir_base: "plots"
+  log_dir_base: "logs"
+
+# --- 回测核心参数 ---
+backtest:
+  start_date: "2017-01-01" # 默认开始日期
+  end_date: "2024-07-31"   # 默认结束日期
+  initial_capital: 1000000 # 初始资金
+  commission_rate: 0.001   # 手续费率
+  slippage: 0.0005         # 滑点率
+  rebalance_months: 1      # 调仓频率 (月)
+
+# --- 策略配置 ---
+strategy:
+  # LLM 策略配置
+  llm:
+    # 默认运行的资产池 (可被命令行 --universe 覆盖)
+    default_universe: "equity_us"
+    # 默认选择的 Top N (可被命令行 --topn 覆盖)
+    default_top_n: 5
+    # API Key: 必须通过环境变量 DEEPSEEK_API_KEY 提供，此处不配置!
+
+  # 如果你想添加静态策略作为对比，可以在这里配置
+  # static:
+  #   default_universe: "equity_us"
+  #   default_top_n: 3
+  #   normalization: "rank"
+  #   factor_weights:
+  #     equity_us:
+  #       factors: ["monthly_std_overnight_return", "eric_multi_dim_reversal"]
+  #       weights: [0.5, -0.5]
+  #     # 可以为其他 universe 添加配置

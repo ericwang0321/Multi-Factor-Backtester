@@ -110,7 +110,7 @@ class LLMStrategy(BaseStrategy):
             # ---【API 调用点】---
             print("[LLMStrategy] 正在调用 DeepSeek API...")
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model="deepseek-reasoner",
                 messages=prompt_messages,
                 response_format={"type": "json_object"},
                 temperature=0.5,
