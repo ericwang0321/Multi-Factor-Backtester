@@ -117,7 +117,7 @@ class LLMStrategy(BaseStrategy):
             # ---【API 调用点】---
             print("[LLMStrategy] 正在调用 DeepSeek API (via OpenAI SDK)...")
             response = self.client.chat.completions.create(
-                model="deepseek-chat", # 仍然使用 DeepSeek 的模型名称
+                model="deepseek-reasoner", # 仍然使用 DeepSeek 的模型名称
                 messages=prompt_messages,
                 response_format={"type": "json_object"},
                 temperature=0.5,
