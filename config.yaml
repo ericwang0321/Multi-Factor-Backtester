@@ -47,7 +47,7 @@ strategy:
   # LLM 策略配置
   llm:
     # 默认运行的资产池 (可被命令行 --universe 覆盖)
-    default_universe: "equity_us"
+    default_universe: "All"
     # --- 【修改点】更新注释 ---
     # 默认 AI 最多可以选择的 Top N 资产数量 (可被命令行 --topn 覆盖)
     default_top_n: 5
