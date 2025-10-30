@@ -35,13 +35,13 @@ paths:
 
 # --- 回测核心参数 ---
 backtest:
-  start_date: "2016-10-01" # 默认开始日期
-  end_date: "2025-08-31"   # 默认结束日期
+  start_date: "2017-08-01" # 默认开始日期
+  end_date: "2025-09-30"   # 默认结束日期
   initial_capital: 1000000 # 初始资金
   commission_rate: 0.001   # 手续费率
   slippage: 0.0005         # 滑点率
   rebalance_months: 1      # 调仓频率 (月)
-
+  factor_buffer_months: 9  # 因子计算缓冲期(月)，确保长周期因子在回测开始时有值
 
 # --- 策略配置 ---
 strategy:

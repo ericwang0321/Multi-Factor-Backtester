@@ -137,39 +137,55 @@ if __name__ == '__main__':
     print(f"\n--- 阶段 1: 数据准备 (资产池: {SELECTED_UNIVERSE}) ---")
     benchmark_df = None
     try:
-        # --- 【修改点 1】: 计算 buffer 起始日期 ---
-        # 需要比实际回测开始日期早一个月的数据用于首次决策
-        buffer_start_date = pd.to_datetime(START_DATE) - pd.DateOffset(months=1)
-        buffer_start_date_str = buffer_start_date.strftime('%Y-%m-%d')
-        # ----------------------------------------
-
+        # --- 【【核心修正：动态调整回测开始日期】】 ---
+        
+        # 1. 获取配置的缓冲期和用户请求的开始日期
+        buffer_months = backtest_conf.get('factor_buffer_months', 1)
+        user_start_date = pd.to_datetime(START_DATE)
+        
+        # 2. 计算理论上需要的 buffer 起始日期
+        # （我们仍然需要这个值来初始化 DataHandler）
+        buffer_start_date_needed = user_start_date - pd.DateOffset(months=buffer_months)
+        buffer_start_date_str = buffer_start_date_needed.strftime('%Y-%m-%d')
+        print(f"DataHandler: 请求 {buffer_months} 个月的因子缓冲期，尝试从 {buffer_start_date_str} 开始加载数据...")
+        
+        # 3. 初始化 DataHandler 并加载数据
         data_handler = DataHandler(
             db_config=DB_CONFIG,
             csv_path=CSV_PRICE_PATH,
-            # --- 【修改点 2】: 传递 buffer 起始日期给 DataHandler ---
-            start_date=buffer_start_date_str, # 让 DataHandler 加载更早的数据
-            # -----------------------------------------------
+            start_date=buffer_start_date_str, # 请求从这个日期开始
             end_date=END_DATE
         )
-        raw_df = data_handler.load_data() # 加载包含 buffer 的数据
+        raw_df = data_handler.load_data() # DataHandler 会加载它能找到的最早数据
         universe_df = data_handler.load_universe_data(UNIVERSE_DEFINITION_PATH)
-
-        # 加载基准数据 (逻辑不变)
-        if SELECTED_UNIVERSE.lower() == 'all' and COMPOSITE_BENCHMARK_CONFIG:
-             benchmark_df = data_handler.load_composite_benchmark_data(COMPOSITE_BENCHMARK_CONFIG)
-             # ... (处理加载失败) ...
-        elif BENCHMARK_DATA_PATH:
-            benchmark_df = data_handler.load_benchmark_data(BENCHMARK_DATA_PATH)
-            # ... (处理加载失败) ...
 
         if raw_df is None or raw_df.empty:
              raise ValueError("DataHandler 未能加载任何价格数据。")
 
-        # --- 【修改点 3】: 在这里插入验证逻辑 ---
-        # 验证加载的数据范围是否覆盖了 buffer
-        if not raw_df.empty and raw_df['datetime'].min() > buffer_start_date:
-             print(f"警告: DataHandler 加载的数据实际起始日期 ({raw_df['datetime'].min().date()}) 晚于所需 buffer 起始日期 ({buffer_start_date.date()})，可能导致首次决策失败或因子计算不准确。")
-        # ------------------------------------
+        # 4. 【关键】检查并动态调整 START_DATE
+        
+        # 获取加载数据的【实际】最早日期
+        actual_data_start_date = raw_df['datetime'].min()
+        
+        # 计算真正可行的【最早回测开始日期】
+        # (数据实际开始日 + 缓冲期)
+        earliest_possible_start_date = actual_data_start_date + pd.DateOffset(months=buffer_months)
+        
+        # 5. 比较并覆盖
+        if user_start_date < earliest_possible_start_date:
+            print("="*80)
+            print(f"!!! 警告：回测开始日期已自动调整。")
+            print(f"    - 您请求的开始日期: {user_start_date.date()}")
+            print(f"    - 您的数据最早日期: {actual_data_start_date.date()}")
+            print(f"    - 您配置的因子缓冲期: {buffer_months} 个月")
+            print(f"    - 最早可行的开始日期: {earliest_possible_start_date.date()}")
+            print(f"    -> 回测将自动从 {earliest_possible_start_date.date()} 开始，以确保长周期因子有效。")
+            print("="*80)
+            
+            # 【重要】覆盖用户的 START_DATE
+            START_DATE = earliest_possible_start_date.strftime('%Y-%m-%d')
+        
+        # --- 【修正结束】 ---
 
         # 打印加载的数据范围保持不变
         print(f"数据加载完毕。完整加载范围: {raw_df['datetime'].min().date()} 到 {raw_df['datetime'].max().date()} (用于因子计算)")
