@@ -42,16 +42,36 @@ backtest:
   slippage: 0.0005         # 滑点率
   rebalance_months: 1      # 调仓频率 (月)
 
+
 # --- 策略配置 ---
 strategy:
   # LLM 策略配置
   llm:
-    # 默认运行的资产池 (可被命令行 --universe 覆盖)
     default_universe: "All"
-    # --- 【修改点】更新注释 ---
-    # 默认 AI 最多可以选择的 Top N 资产数量 (可被命令行 --topn 覆盖)
     default_top_n: 5
     # API Key: 必须通过环境变量 DEEPSEEK_API_KEY 提供，此处不配置!
+
+    # --- 【核心修改点】 ---
+    # 替换为您新因子库中的因子名称
+    factors_to_use:
+      - 'momentum'
+      - 'breakout_quality_score'
+      - 'eric_adx_weighted_momentum'
+      - 'amount_std'
+      - 'smart_momentum_adx_r2'
+      - 'eric_tail_skew'
+      # - 'ht_low_vol_breakout' # 您也可以添加这个
+      # - 'probabilistic_trend_rsrs' # 或者这个
+
+    # 同样，更新这里的解释，以便 AI 理解它们
+    factor_explanations:
+      'momentum': '168日价格动量 (总收益率)。'
+      'breakout_quality_score': '突破质量分。结合了动量、市场参与度（换手率）和前期稳定性（低波动）。'
+      'eric_adx_weighted_momentum': 'ADX加权动量。使用ADX趋势强度来调节动量信号。'
+      'amount_std': '42日成交额标准差。'
+      'smart_momentum_adx_r2': '智慧动量。基础动量 * (ADX趋势概率 * R-squared稳定性)。'
+      'eric_tail_skew': '经验极端口概率偏度。测量近期极端收益的偏斜程度（反转信号）。'
+    # --- 【修改结束】 ---
 
 # 如果你想添加静态策略作为对比，可以在这里配置
 # static:

@@ -117,10 +117,14 @@ if __name__ == '__main__':
         'DB_CONFIG': DB_CONFIG,
         'PRICE_DATA_PATH': CSV_PRICE_PATH
     }
-    AI_STRATEGY_CONFIG = { # ... (策略配置) ...
-        'universe_to_trade': SELECTED_UNIVERSE,
-        'top_n': MAX_TOP_N
-    }
+    # --- 【核心修改点】---
+    # 从 config.yaml 加载 strategy.llm 节点下的【所有】配置
+    AI_STRATEGY_CONFIG = config.get('strategy', {}).get('llm', {}).copy()
+
+    # 用命令行参数（如果有）覆盖默认值
+    AI_STRATEGY_CONFIG['universe_to_trade'] = SELECTED_UNIVERSE 
+    AI_STRATEGY_CONFIG['top_n'] = MAX_TOP_N
+    # --- 【修改结束】 ---
     PLOT_DIR_BASE = os.path.join(BASE_DIR, paths_conf.get('plot_dir_base', 'plots'))
     LOG_DIR_BASE = os.path.join(BASE_DIR, paths_conf.get('log_dir_base', 'logs'))
     PLOT_DIR = os.path.join(PLOT_DIR_BASE, SELECTED_UNIVERSE)

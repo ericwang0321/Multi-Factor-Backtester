@@ -2,293 +2,271 @@
 import pandas as pd
 import numpy as np
 import xarray as xr
-import pandas_ta as ta # 使用 pandas_ta 库简化技术指标计算
-from typing import Dict, List, Optional # <--- 【修正】添加这行导入语句
-from collections import defaultdict # <--- 【修正】添加这行导入语句
+import bottleneck as bl
+import statsmodels.api as sm
+from typing import Dict, List, Optional, Any
+from collections import defaultdict
 
-# 导入必要的辅助函数
-from .factor_helpers import xr_ewm, where, delta, pct_change, ts_mean, ts_rolling
-# 假设 DataHandler 类定义在 .data_handler 模块中
+# 从同级目录导入数据处理器和新的因子定义文件
 from .data_handler import DataHandler
+from .factor_definitions import * # 导入所有 BaseAlpha 因子类和辅助函数
 
 class FactorEngine:
     """
-    计算 AI 策略所需的核心技术指标 (EMA, MACD, RSI)。
-    设计为可扩展，方便后续添加更多因子。
-    使用 pandas_ta 库简化计算。
+    【升级版】因子引擎。
+    使用 factor_definitions.py 中的 BaseAlpha 类和 xarray 进行计算。
+    实现了全时间序列缓存，以提高回测速度。
     """
-    REQUIRED_COLS = ['open', 'high', 'low', 'close', 'volume'] # 计算这些因子所需列
-
-    def __init__(self, data_handler: DataHandler): # 【修正】添加类型提示
+    
+    def __init__(self, data_handler: DataHandler):
         """
         初始化因子引擎。
 
         Args:
             data_handler (DataHandler): 已初始化的数据处理器实例。
         """
-        print("FactorEngine: 正在初始化...")
+        print("FactorEngine: 正在初始化 (使用 BaseAlpha/Xarray 引擎)...")
         self.data_handler = data_handler
-        # 确保 DataHandler 已加载数据
-        self.raw_df = self.data_handler.load_data()
+        
+        # 缓存
+        self._factor_cache: Dict[str, pd.DataFrame] = {} # 缓存已计算的因子全序列 (DataFrame)
+        self.xarray_data: Optional[xr.DataArray] = None # 缓存转换后的 Xarray 原始数据
+        
+        # --- 因子注册表 ---
+        # 从 prepare_factor_data.py 复制而来
+        # Key: 因子名称 (与 config.yaml 对应)
+        # Value: (因子计算类, {参数字典})
+        self.FACTOR_REGISTRY: Dict[str, Any] = {
+            # --- 您新文件中的所有因子定义 ---
+            'alpha006': (Alpha006, {'corr_period': 15}),
+            'alpha007': (Alpha007, {'delta_period': 3, 'vol_mean_period': 10, 'rank_period': 50}),
+            'alpha013': (Alpha013, {'cov_period': 5}),
+            'alpha018': (Alpha018, {'std_period': 5, 'corr_period': 12}),
+            'alpha023': (Alpha023, {'ts_period': 30, 'delta_period': 3}),
+            'alpha033': (Alpha033, {}),
+            'alpha040': (Alpha040, {'ts_period': 8}),
+            'alpha041': (Alpha041, {}),
+            'alpha042': (Alpha042, {}),
+            'alpha053': (Alpha053, {'ts_period': 15}),
+            'alpha060': (Alpha060, {'ts_period': 25}),
+            'alpha191_014': (Alpha191_014, {'delay_period': 3}),
+            'alpha191_018': (Alpha191_018, {'delay_period': 3}),
+            'alpha191_020': (Alpha191_020, {'delay_period': 3}),
+            'amihud_illiquidity': (AmihudIlliquidity, {'window': 126}),
+            'amount_mean': (AmountMean, {'window': 252}),
+            'amount_std': (AmountStd, {'window': 42}),
+            'amount_volatility': (AmountVolatility, {'window': 63}),
+            'cmo': (CMO, {'window': 40}),
+            'dv_divergence': (DV_Divergence, {'price_window': 15, 'corr_window': 20}),
+            'eric_adx_weighted_momentum': (Eric_ADX_Weighted_Momentum, {'momentum_window': 22, 'adx_window': 25}),
+            'eric_asymmetric_vol_reversion': (Eric_Asymmetric_Volatility_Reversion, {'window': 60}),
+            'eric_composite_mom_bbw': (Eric_Composite_Momentum_BBW, {'momentum_window': 11, 'adx_window': 14, 'bb_window': 80, 'mom_weight': 0.2}),
+            'eric_cs_resid_vol': (Eric_CS_Residual_Volatility, {'window': 100}),
+            'eric_enhanced_momentum': (EricEnhancedMomentum, {}),
+            'eric_improved_alpha_022': (Eric_Improved_Alpha_022, {}),
+            'eric_multi_dim_reversal': (EricMultiDimReversal, {'window': 120}),
+            'eric_multi_dim_reversal_v2': (EricMultiDimReversalV2, {'short_window': 20, 'long_window': 120}),
+            'eric_pv_corr': (EricFactor, {'window': 60}),
+            'eric_pv_divergence': (Eric_PV_Divergence_Covariance, {'window': 10}),
+            'eric_tail_skew': (Eric_Improved_Skewness, {'window': 84, 'std_multiple': 1.0}),
+            'eric_u_shape_vol': (Eric_U_Shape_Volatility_Factor, {'window': 30}),
+            'eric_vol_turnover_coupling': (Eric_Volatility_Turnover_Coupling, {'window': 10}),
+            'falkenblog_disparity_mean': (Falkenblog_Disparity_Mean, {'window': 40}),
+            'falkenblog_disparity_std': (Falkenblog_Disparity_Std, {'window': 40}),
+            'gp_new_alpha_1': (GP_New_Alpha_1, {}),
+            'gp_new_alpha_2': (GP_New_Alpha_2, {}),
+            'kurtosis': (HT_Kurtosis, {'window': 60}),
+            'logcap': (LogCap, {}),
+            'momentum': (Momentum, {'window': 168}),
+            'momentum_acceleration': (MomentumAcceleration, {'period1': 42, 'period2': 126}),
+            'momentum_daily_mean': (HT_Momentum_DailyMean, {'window': 42}),
+            'momentum_exp_weighted': (HT_Momentum_ExpWeighted, {'window': 189}),
+            'momentum_turnover_weighted': (HT_Momentum_TurnoverWeighted, {'window': 33}),
+            'monthly_avg_overnight_return': (Eric_Monthly_Avg_Overnight_Return, {'window': 55}),
+            'monthly_std_overnight_return': (Eric_Monthly_Std_Overnight_Return, {'window': 30}),
+            'rsi': (RSI, {'window': 12}),
+            'skewness': (HT_Skewness, {'window': 42}),
+            'stochastic_k': (StochasticK, {'window': 40}),
+            'term_structure_proxy': (HT_TermStructure_RollYield_Proxy, {'window': 30}),
+            'turnover_bias': (HT_Turnover_Bias, {'short_window': 66, 'long_window': 378}),
+            'turnover_mean': (TurnoverMean, {'window': 10}),
+            'turnover_std': (TurnoverStd, {'window': 63}),
+            'turnover_std_bias': (HT_Turnover_Std_Bias, {'short_window': 66, 'long_window': 126}),
+            'volatility': (HT_Volatility, {'window': 30}),
+            'volume_mean': (VolumeMean, {'window': 10}),
+            'volume_std': (VolumeStd, {'window': 30}),
+            'trend_score': (TrendScore, {'window': 30}),
+            'eric_asymmetric_vol_momentum': (HT_Asymmetric_Volatility_Momentum, {'mom_window': 90, 'vol_window': 90, 'delta_window': 20}),
+            'ht_low_vol_breakout': (HT_Low_Volatility_Breakout, {'mom_window': 90, 'vol_window': 90}), 
+            'ht_trend_exhaustion_reversal': (HT_Trend_Exhaustion_Reversal, {'window': 90}), # 修正了您新文件中的参数不匹配问题
+            'ht_skewness_reversal': (HT_Skewness_Reversal, {'window': 120}),
+            'ht_ts_vol_enhanced_mom': (HT_TS_Vol_Enhanced_Momentum, {'ts_window': 30, 'vol_window': 30, 'vol_rank_threshold': 0.5}),
+            'probabilistic_trend_rsrs': (Probabilistic_Trend_RSRS, {
+                'rsrs_window': 22, 'adx_window': 14, 'logistic_midpoint': 25.0, 'logistic_steepness': 0.2
+            }),
+            'quality_momentum_r2': (Quality_Momentum_R2, {
+                'momentum_window': 126, 'regression_window': 126
+            }),
+            'smart_momentum_adx_r2': (Smart_Momentum_ADX_R2, {
+                'window': 126, 'adx_window': 14
+            }),
+            'breakout_quality_score': (Breakout_Quality_Score, {
+                'mom_window': 22, 'short_turn_window': 22, 'long_turn_window': 126, 'vol_window': 63
+            }),
+            'trend_certainty_score': (Trend_Certainty_Score, {
+                'window': 63, 'adx_window': 14, 'adx_threshold': 25.0
+            }),
+        }
+        print(f"FactorEngine: 初始化完成。已注册 {len(self.FACTOR_REGISTRY)} 个因子。")
 
-        # 准备因子计算所需的宽格式价格数据
-        self.prices: Dict[str, pd.DataFrame] = {} # 【修正】使用导入的 Dict
-        missing_cols = []
-        for col in self.REQUIRED_COLS:
+    def _get_xarray_data(self) -> xr.DataArray:
+        """
+        (私有) 辅助函数：从 DataHandler 加载所有原始数据并转换为 Xarray 格式。
+        只在第一次需要时执行一次。
+        """
+        if self.xarray_data is not None:
+            return self.xarray_data
+
+        print("FactorEngine: 首次计算，正在从 DataHandler 加载并转换所有数据到 Xarray...")
+        
+        # 1. 从 DataHandler 获取长格式的原始 DataFrame (包含 buffer)
+        raw_df = self.data_handler.load_data()
+        if raw_df is None or raw_df.empty:
+            raise ValueError("FactorEngine: DataHandler 未能提供有效的原始数据。")
+
+        # 2. 确保 vwap 存在 (您的因子库需要)
+        if 'avg_price' in raw_df.columns: 
+            raw_df = raw_df.rename(columns={'avg_price': 'vwap'})
+        
+        # 3. 筛选所需列并转换为宽格式
+        required_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turnover', 'market_cap', 'vwap']
+        existing_cols = [col for col in required_cols if col in raw_df.columns]
+        
+        # 使用 pivot_table 处理重复项 (更健壮)
+        wide_data_list = []
+        for col in existing_cols:
             try:
-                # 注意：这里我们获取所有代码的价格，后续在 get_snapshot 中过滤
-                self.prices[col] = self.data_handler.get_pivot_prices(col, codes=None)
-                if self.prices[col].empty:
-                    missing_cols.append(col)
-            except ValueError as e:
-                missing_cols.append(f"{col} ({e})")
+                # 使用 pivot_table (默认 aggfunc='mean') 来处理 (datetime, sec_code) 重复
+                wide_col = pd.pivot_table(raw_df, index='datetime', columns='sec_code', values=col)
+                wide_data_list.append(wide_col)
+            except Exception as e:
+                print(f"FactorEngine: 转换列 {col} 为宽格式时出错: {e}")
+                
+        if not wide_data_list:
+             raise ValueError("FactorEngine: 无法从原始数据创建任何宽格式列。")
+             
+        wide_data = pd.concat(wide_data_list, axis=1, keys=existing_cols)
+        
+        # 4. 填充缺失值 (因子库需要)
+        wide_data = wide_data.interpolate(method='linear', limit_direction='both', axis=0)
+        
+        # 5. 转换为 Xarray (使用您新文件中的辅助函数)
+        # 我们需要先定义这个辅助函数
+        def convert_wide_df_to_xarray(wide_df: pd.DataFrame) -> xr.DataArray:
+            """将多重索引的宽格式 DataFrame 转换为 xarray.DataArray"""
+            if not isinstance(wide_df.columns, pd.MultiIndex):
+                raise ValueError("输入必须是 MultiIndex DataFrame")
+            stacked = wide_df.stack(level='sec_code')
+            stacked.index.names = ['datetime', 'sec_code']
+            stacked.columns.name = 'field'
+            return stacked.to_xarray().to_array('field')
 
-        if missing_cols:
-            raise ValueError(f"FactorEngine: 无法获取计算因子所需的列: {', '.join(missing_cols)}。请确保数据完整。")
-
-        # 将多个价格 DataFrame 合并为一个，MultiIndex 列格式为 ('close', 'SPY.P')
-        # pandas_ta 需要这种格式
-        print("FactorEngine: 正在合并价格数据以便计算因子...")
-        self.multi_col_df = pd.concat(self.prices, axis=1)
-
-        self._factor_cache: Dict[str, pd.DataFrame] = {} # 缓存因子计算结果 (宽格式 DataFrame) # 【修正】使用导入的 Dict
-        print("FactorEngine: 初始化完成。")
-
-    # 【修正】返回值类型提示 Optional[Dict[str, pd.DataFrame]]
-    def _compute_ta_indicator(self, indicator_name: str, **kwargs) -> Optional[Dict[str, pd.DataFrame]]:
-        """
-        使用 pandas_ta 计算技术指标。
-
-        Args:
-            indicator_name (str): pandas_ta 支持的指标名称 (小写)。
-            **kwargs: 传递给 pandas_ta 指标函数的参数 (例如 length=14)。
-
-        Returns:
-            Optional[Dict[str, pd.DataFrame]]: 包含一个或多个因子 DataFrame 的字典，如果计算失败则返回 None。
-                                            键是因子名称 (例如 'ema_12', 'macd_line_12_26')。
-        """
-        # ---【内部逻辑保持不变】---
-        # 生成缓存键 (确保 kwargs 顺序一致)
-        kwargs_sorted = sorted(kwargs.items())
-        cache_key = f"{indicator_name}_{'_'.join(f'{k}{v}' for k, v in kwargs_sorted)}"
-
-        # 检查缓存 (直接返回缓存的整个字典或单个 DataFrame)
-        # 注意: 缓存现在存储的是计算结果字典或单个 DataFrame
-        cached_result = self._factor_cache.get(cache_key)
-        if cached_result is not None:
-             # 如果缓存的是一个字典 (如 MACD)，直接返回
-             # 如果缓存的是单个 DataFrame (如 EMA)，为了统一返回格式，也包在字典里返回
-             if isinstance(cached_result, pd.DataFrame):
-                 return {cache_key: cached_result} # 包装成字典返回
-             elif isinstance(cached_result, dict):
-                 return cached_result # 直接返回字典
-             else:
-                 # 处理可能的异常情况
-                 print(f"FactorEngine: 警告 - 缓存中存在未知类型的数据: {cache_key}")
-                 # 尝试重新计算
-                 pass # 继续执行计算逻辑
-
-        print(f"FactorEngine: 正在计算指标 '{indicator_name}' (参数: {kwargs})...")
         try:
-            # 获取 pandas_ta 中的指标函数
-            # 修正查找逻辑，更清晰
-            indicator_func = None
-            if hasattr(ta, indicator_name):
-                 indicator_func = getattr(ta, indicator_name)
-            elif hasattr(ta.momentum, indicator_name):
-                 indicator_func = getattr(ta.momentum, indicator_name)
-            elif hasattr(ta.overlap, indicator_name):
-                 indicator_func = getattr(ta.overlap, indicator_name)
-            elif hasattr(ta.trend, indicator_name):
-                 indicator_func = getattr(ta.trend, indicator_name)
-            # 可以根据需要添加其他 ta 子模块
-
-            if not indicator_func:
-                print(f"FactorEngine: 错误 - pandas_ta 中不支持指标 '{indicator_name}'。")
-                return None
-
-            # 准备输入数据 (pandas_ta 通常需要小写的列名)
-            # 我们需要为每个 sec_code 单独计算
-            all_results_dict: Dict[str, List[pd.Series]] = defaultdict(list) # 用于收集每个因子的 Series 列表
-            sec_codes = self.multi_col_df.columns.get_level_values(1).unique()
-
-            for code in sec_codes:
-                asset_df = self.multi_col_df.loc[:, pd.IndexSlice[:, code]].copy()
-                if asset_df.empty: continue # 跳过没有数据的资產
-
-                asset_df.columns = asset_df.columns.droplevel(1) # 移除顶层 ('open', 'close'...)
-                asset_df.rename(columns=str.lower, inplace=True) # 转为小写
-
-                # 确保计算所需列存在且有效
-                required_cols_for_indicator = ['close'] # 默认需要 close
-                if indicator_name in ['adx']: required_cols_for_indicator = ['high', 'low', 'close']
-                if indicator_name in ['macd']: required_cols_for_indicator = ['close']
-                if indicator_name in ['ema']: required_cols_for_indicator = ['close']
-                # ...可以为其他指标添加所需列...
-
-                # 检查数据是否足够长且有效
-                if len(asset_df) < kwargs.get('length', kwargs.get('span', 1)) or asset_df[required_cols_for_indicator].isnull().all().any():
-                     # print(f"FactorEngine: 资產 {code} 数据不足或无效，跳过 {indicator_name} 计算。")
-                     continue # 跳过这个资產
-
-                # ---【核心计算调用】---
-                # 确定输入列
-                input_series = asset_df['close'] # 默认
-                if indicator_name in ['adx']:
-                     # ADX 需要 DataFrame 输入 high, low, close
-                     input_data = asset_df[['high', 'low', 'close']]
-                # elif ... 其他需要特定输入的指标
-                else:
-                     input_data = input_series # 大部分指标只需要 close
-
-                result = indicator_func(input_data, **kwargs)
-                # ---【计算结束】---
-
-                if result is None: continue # 计算失败，跳过
-
-                # ---【处理返回结果】---
-                if isinstance(result, pd.DataFrame):
-                    # MACD 返回多列: MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
-                    if indicator_name == 'macd':
-                        fast = kwargs.get("fast",12); slow = kwargs.get("slow",26); signal = kwargs.get("signal",9)
-                        line_col = f'MACD_{fast}_{slow}_{signal}'
-                        signal_col = f'MACDs_{fast}_{slow}_{signal}'
-                        hist_col = f'MACDh_{fast}_{slow}_{signal}'
-                        if line_col in result.columns:
-                            all_results_dict[f'macd_line_{fast}_{slow}'].append(result[line_col].rename(code))
-                        if signal_col in result.columns:
-                            all_results_dict[f'macd_signal_{signal}'].append(result[signal_col].rename(code))
-                        if hist_col in result.columns:
-                            all_results_dict[f'macd_hist_{fast}_{slow}_{signal}'].append(result[hist_col].rename(code))
-                    # ADX 返回多列: ADX_14, DMP_14, DMN_14
-                    elif indicator_name == 'adx':
-                        length = kwargs.get("length", 14)
-                        adx_col = f'ADX_{length}'
-                        if adx_col in result.columns:
-                             all_results_dict[f'adx_{length}'].append(result[adx_col].rename(code))
-                         # 如果需要 +DI (DMP), -DI (DMN) 可以在这里提取
-                    else:
-                        print(f"FactorEngine: 警告 - 指标 {indicator_name} 返回未处理的 DataFrame 格式。")
-
-                elif isinstance(result, pd.Series):
-                    # EMA 返回 EMA_span
-                    if indicator_name == 'ema':
-                         factor_col_name = f"ema_{kwargs.get('span', '')}"
-                         all_results_dict[factor_col_name].append(result.rename(code))
-                    # RSI 返回 RSI_length
-                    elif indicator_name == 'rsi':
-                         factor_col_name = f"rsi_{kwargs.get('length', '')}"
-                         all_results_dict[factor_col_name].append(result.rename(code))
-                    else:
-                         # 其他返回 Series 的指标
-                         factor_col_name = f"{indicator_name}_{kwargs.get('length', '')}"
-                         all_results_dict[factor_col_name].append(result.rename(code))
-
-            # --- 合并结果并缓存 ---
-            final_factors_dict: Dict[str, pd.DataFrame] = {}
-            for factor_col, series_list in all_results_dict.items():
-                if series_list:
-                    try:
-                        factor_df = pd.concat(series_list, axis=1)
-                        # 因子值滞后一期
-                        factor_df_shifted = factor_df.shift(1)
-                        # 将单个计算出的因子存入缓存
-                        self._factor_cache[factor_col] = factor_df_shifted
-                        final_factors_dict[factor_col] = factor_df_shifted
-                    except Exception as concat_err:
-                         print(f"FactorEngine: 合并因子 '{factor_col}' 时出错: {concat_err}")
-
-            if not final_factors_dict:
-                 print(f"FactorEngine: 指标 '{indicator_name}' 未能为任何资產生成有效结果。")
-                 return None # 没有成功计算出任何因子
-
-            print(f"FactorEngine: 指标 '{indicator_name}' 计算完成，生成因子: {list(final_factors_dict.keys())}。")
-            # 将这个指标调用产生的所有因子（可能多个）一起存入一个以 cache_key 命名的缓存条目
-            # 这与之前的逻辑不同，之前是按单个因子名存
-            self._factor_cache[cache_key] = final_factors_dict # 缓存整个结果字典
-            return final_factors_dict
-
+            self.xarray_data = convert_wide_df_to_xarray(wide_data)
+            print("FactorEngine: Xarray 数据转换并缓存成功。")
+            return self.xarray_data
         except Exception as e:
-            print(f"FactorEngine: 计算指标 '{indicator_name}' 时发生严重错误: {e}")
+            raise RuntimeError(f"FactorEngine: 转换宽 DataFrame 到 Xarray 时失败: {e}")
+
+    def _compute_and_cache_factor(self, factor_name: str) -> pd.DataFrame:
+        """
+        (私有) 辅助函数：计算单个因子的全时间序列并将其存入缓存。
+        """
+        if factor_name not in self.FACTOR_REGISTRY:
+            raise ValueError(f"FactorEngine: 因子 '{factor_name}' 未在 FACTOR_REGISTRY 中定义。")
+            
+        print(f"FactorEngine: 正在计算因子 '{factor_name}' 的全时间序列 (首次)...")
+        
+        try:
+            # 1. 获取 xarray 格式的原始数据
+            market_array = self._get_xarray_data()
+            
+            # 2. 从注册表获取因子类和参数
+            factor_class, params = self.FACTOR_REGISTRY[factor_name]
+            
+            # 3. 实例化并运行计算
+            factor_obj = factor_class(**params)
+            # .transform() 方法返回一个 (datetime x sec_code) 的 DataFrame
+            factor_df = factor_obj.transform(market_array) 
+            
+            # 4. 因子值滞后一期 (!!!!!!)
+            # 这是为了确保在 decision_date (t-1) 使用的是 t-1 的可用数据
+            # 您的新因子库在 `main` 函数中执行了 shift(1)，我们在这里也必须执行
+            factor_df_shifted = factor_df.shift(1)
+            
+            # 5. 存入缓存
+            self._factor_cache[factor_name] = factor_df_shifted
+            print(f"FactorEngine: 因子 '{factor_name}' 已计算并缓存。")
+            return factor_df_shifted
+            
+        except Exception as e:
+            print(f"FactorEngine: 计算 Xarray 因子 {factor_name} 时发生严重错误: {e}")
             import traceback
             traceback.print_exc()
-            return None # 返回 None 表示计算失败
+            # 存入一个空 DataFrame 以免重复计算
+            self._factor_cache[factor_name] = pd.DataFrame() 
+            return self._factor_cache[factor_name]
 
-    def get_factor_snapshot(self, current_date: pd.Timestamp, codes: List[str]) -> pd.DataFrame: # 【修正】使用导入的 List
+    def get_factor_snapshot(self, current_date: pd.Timestamp, codes: List[str], factors: List[str]) -> pd.DataFrame:
         """
-        获取指定日期、指定证券代码列表的所有已实现因子的截面快照。
-
+        【公共接口】获取指定日期、指定代码、指定因子的截面快照。
+        (此函数的接口与旧版完全兼容)
+        
         Args:
-            current_date (pd.Timestamp): 需要获取快照的日期。
+            current_date (pd.Timestamp): 需要获取快照的日期 (决策日, t-1)。
             codes (List[str]): 需要包含在快照中的证券代码列表。
+            factors (List[str]): 需要计算的因子名称列表 (来自 config.yaml)。
 
         Returns:
             pd.DataFrame: 包含指定日期、指定代码的因子值的 DataFrame (索引: sec_code, 列: 因子名称)。
         """
-        # print(f"FactorEngine: 正在为 {current_date.date()} (代码: {len(codes)}个) 生成因子快照...")
-        all_factor_data: Dict[str, pd.DataFrame] = {} # 用于存储所有因子的宽格式 DataFrame
-
-        # --- 按需计算并合并所有因子 ---
-        # 1. 计算/获取 EMA(12) 和 EMA(26)
-        # 注意：_compute_ta_indicator 返回的是字典
-        ema12_dict = self._compute_ta_indicator('ema', span=12)
-        if ema12_dict: all_factor_data.update(ema12_dict)
-        ema26_dict = self._compute_ta_indicator('ema', span=26)
-        if ema26_dict: all_factor_data.update(ema26_dict)
-
-        # 2. 计算/获取 MACD (会产生多个因子)
-        macd_dict = self._compute_ta_indicator('macd', fast=12, slow=26, signal=9)
-        if macd_dict: all_factor_data.update(macd_dict)
-
-        # 3. 计算/获取 RSI(14)
-        rsi_dict = self._compute_ta_indicator('rsi', length=14)
-        if rsi_dict: all_factor_data.update(rsi_dict)
-
-        # --- 可扩展点 ---
-        # adx_dict = self._compute_ta_indicator('adx', length=14)
-        # if adx_dict: all_factor_data.update(adx_dict)
-        # -----------------
-
-        # --- 从所有已计算的因子中提取当天的截面数据 ---
         snapshot_series_list: List[pd.Series] = []
-        valid_codes_in_snapshot = set()
-
-        # 遍历所有计算出的因子 DataFrame (例如 'ema_12', 'macd_line_12_26', 'rsi_14' 等)
-        for factor_name, factor_df in all_factor_data.items():
-            if current_date in factor_df.index:
-                # 提取当天的 Series (列是 sec_code)
+        
+        # 1. 遍历所有需要的因子
+        for factor_name in factors:
+            # 2. 检查因子是否已计算并缓存
+            if factor_name not in self._factor_cache:
+                # 如果不在缓存中，立即计算其全时间序列并缓存
+                self._compute_and_cache_factor(factor_name)
+                
+            # 3. 从缓存中提取全序列
+            factor_df = self._factor_cache[factor_name]
+            
+            # 4. 从全序列中提取当天的截面
+            if factor_df.empty or current_date not in factor_df.index:
+                # print(f"FactorEngine: 警告 - 在 {current_date.date()} 因子 '{factor_name}' 无数据。")
+                # 创建一个空 Series 以保持 DataFrame 结构
+                daily_series = pd.Series(index=codes, dtype=float, name=factor_name)
+            else:
                 daily_series = factor_df.loc[current_date]
                 # 只保留需要的 codes
-                snapshot_series = daily_series[daily_series.index.intersection(codes)]
-                # 设置 Series 的 name 为因子名
-                snapshot_series.name = factor_name
-                snapshot_series_list.append(snapshot_series)
-                valid_codes_in_snapshot.update(snapshot_series.index)
-            # else:
-            #     print(f"FactorEngine: 警告 - 在 {current_date.date()} 因子 '{factor_name}' 无数据。")
+                daily_series = daily_series[daily_series.index.intersection(codes)]
+            
+            daily_series.name = factor_name
+            snapshot_series_list.append(daily_series)
 
         if not snapshot_series_list:
              print(f"FactorEngine: 警告 - 在 {current_date.date()} 未找到任何因子数据。")
-             return pd.DataFrame(index=pd.Index(codes, name='sec_code')) # 返回空 DataFrame 但保留索引
+             return pd.DataFrame(index=pd.Index(codes, name='sec_code'))
 
-        # 将所有因子的 Series 合并成一个 DataFrame (索引是 sec_code, 列是 factor_name)
+        # 5. 将所有因子的 Series 合并成一个 DataFrame
         snapshot_df = pd.concat(snapshot_series_list, axis=1)
         snapshot_df.index.name = 'sec_code'
 
-        # 确保所有请求的 codes 都在索引中，即使它们没有任何因子数据 (用 NaN 填充)
+        # 6. 确保所有请求的 codes 都在索引中 (用 NaN 填充)
         snapshot_df = snapshot_df.reindex(codes)
 
-        # 因子值预处理：填充缺失值 (AI 不喜欢 NaN)
-        # 简单的填充策略：用 0 填充。更复杂的可以考虑中位数等。
+        # 7. 因子值预处理 (AI 不喜欢 NaN)
         snapshot_df_filled = snapshot_df.fillna(0.0)
 
-        # print(f"FactorEngine: {current_date.date()} 因子快照生成完毕。")
         return snapshot_df_filled
-
-    def add_custom_factor(self, factor_name: str, factor_logic_func):
-        """
-        (未来扩展功能) 允许用户添加自定义因子计算逻辑。
-        factor_logic_func 应该接收 self.multi_col_df 并返回一个宽格式的因子 DataFrame。
-        """
-        pass
-

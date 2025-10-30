@@ -66,8 +66,9 @@ class BacktestEngine:
             self.all_close_prices = self.data_handler.get_pivot_prices('close', codes=self.codes_in_universe)
 
             # ---【修改点 3】: 按实际回测区间过滤用于回测循环的价格 ---
-            self.open_prices = self.all_open_prices.loc[self.effective_start_date:self.end_date]
-            self.close_prices = self.all_close_prices.loc[self.effective_start_date:self.end_date]
+            # --- 【附带修复】: 添加 .copy() 来避免 SettingWithCopyWarning ---
+            self.open_prices = self.all_open_prices.loc[self.effective_start_date:self.end_date].copy()
+            self.close_prices = self.all_close_prices.loc[self.effective_start_date:self.end_date].copy()
             # ---------------------------------------------------------
 
             if self.open_prices.empty or self.close_prices.empty:
@@ -187,10 +188,23 @@ class BacktestEngine:
 
                 # b. 获取决策日的因子快照
                 try:
+                    # --- 【核心修改点】 ---
+                    # 1. 从策略获取它需要的因子列表
+                    if hasattr(self.strategy, 'get_required_factors'):
+                        factors_needed = self.strategy.get_required_factors()
+                        if not factors_needed: # 策略返回了空列表
+                            raise ValueError("策略 get_required_factors() 返回了一个空列表，无法获取因子。")
+                    else:
+                        # 备用逻辑，以防策略没有实现该方法
+                        raise NotImplementedError("当前策略没有实现 get_required_factors() 方法。")
+
+                    # 2. 将因子列表传递给因子引擎
                     factor_snapshot = self.factor_engine.get_factor_snapshot(
-                        decision_date, # 使用前一交易日作为决策日期
-                        codes=self.codes_in_universe
+                        decision_date,    # 决策日
+                        codes=self.codes_in_universe,
+                        factors=factors_needed  # <--- 传入缺失的 'factors' 参数
                     )
+                    # --- 【修改结束】 ---
                 except Exception as e:
                      print(f"BacktestEngine: 错误 - 在 {decision_date.date()} 获取因子快照失败: {e}。跳过本次调仓。")
                      continue
