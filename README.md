@@ -1,11 +1,12 @@
-# LLM 驱动的量化回测框架 (v2.1 - 动态日期调整)
+# LLM 驱动的量化回测框架 (v2.2 - 多模型支持)
 
-本项目是一个基于大型语言模型（LLM，本项目使用 DeepSeek）进行投资决策的量化回测框架。框架采用面向对象（OOP）的设计，将数据处理、因子计算、投资组合管理、策略决策和回测引擎解耦，方便扩展和维护。
+本项目是一个基于大型语言模型（LLM）进行投资决策的量化回测框架。框架采用面向对象（OOP）的设计，将数据处理、因子计算、投资组合管理、策略决策和回测引擎解耦，方便扩展和维护。
 
-**核心特色 (v2.1):**
+**核心特色 (v2.2):**
 
   * **强大的因子引擎**: 框架已升级，使用基于 `xarray` 和 `BaseAlpha` 类的专业因子库（源自 `prepare_factor_data.py`），支持复杂的横截面和时间序列因子计算。
   * **配置驱动的因子**: 您可以通过 `config.yaml` 动态指定任意已注册的因子及其解释，LLM 将自动接收并使用它们进行决策。
+  * **多模型支持**: 框架已重构，支持在多个 LLM 供应商（如 DeepSeek, 阿里云通义千问）及其特定模型（如 `qwen-plus`, `qwen-max`）之间通过配置文件灵活切换。
   * **LLM 自主决策**: LLM 不仅负责选择投资标的，还能自主决定持仓数量（在设定的最大值内）和每只标的的具体权重。
   * **智能日期调整**: 框架会自动检查您的数据历史长度和所需的因子计算缓冲期 (`factor_buffer_months`)，并在必要时**自动推迟回测开始日期**，确保长周期因子在回测开始时有有效值。
 
@@ -18,7 +19,7 @@ your_project_directory/
 │   ├── data_handler.py      # 数据加载器
 │   ├── factor_definitions.py # 【新】所有因子(BaseAlpha)的计算逻辑
 │   ├── factor_engine.py     # 【新】因子引擎 (调用 factor_definitions.py)
-│   ├── strategy.py          # 【新】策略 (从配置动态读取因子)
+│   ├── strategy.py          # 【新】策略 (从配置动态读取因子和模型)
 │   ├── portfolio.py         # 投资组合/交易执行
 │   ├── backtest_engine.py   # 【新】回测引擎 (连接策略和因子引擎)
 │   └── performance.py       # 性能分析
@@ -54,35 +55,56 @@ your_project_directory/
 
 5.  **配置 `config.yaml` (关键步骤):**
 
-      * 检查数据库连接（如果需要）、文件路径、基准映射等。
-      * **【重要】配置 `backtest` 节点**:
+      * 检查数据库连接、文件路径、基准映射等。
+      * **配置 `backtest` 节点**:
           * `start_date`: 您**期望**的回测开始日期。
-          * `factor_buffer_months`: **因子计算所需的缓冲期（月数）**。这个值应该**大于等于**您使用的所有因子中最长回看窗口所需的月数。例如，如果最长因子需要 168 天（约 8 个月），建议设置为 `9`。
-      * **【重要】配置 `strategy.llm` 节点**:
+          * `factor_buffer_months`: **因子计算所需的缓冲期（月数）**。这个值应该**大于等于**您使用的所有因子中最长回看窗口所需的月数（例如，`momentum` 需要 168 天，约 8 个月，建议设置为 `9`）。
+      * **配置 `strategy.llm` 节点**:
+          * `active_model`: **必需**。选择一个您想激活的模型（必须在 `models` 列表中定义）。
+          * `api_providers`: **必需**。定义每个 LLM 供应商的 `base_url` 和 `api_key_env`（对应的环境变量名）。
+          * `models`: **必需**。定义每个具体模型的 `provider` 和 `model_name`。
           * `factors_to_use`: **必需**。指定要计算和发送给 LLM 的因子列表。
-          * `factor_explanations`: **必需**。为 `factors_to_use` 中的每个因子提供解释，供 LLM 理解。
+          * `factor_explanations`: **必需**。为因子提供解释。
 
     **`config.yaml` 示例:**
 
     ```yaml
     backtest:
-      start_date: "2016-10-01" # 期望的回测开始日期
-      end_date: "2025-08-31"
-      initial_capital: 1000000
-      commission_rate: 0.001
-      slippage: 0.0005
-      rebalance_months: 1
-      # --- 【新】因子缓冲期 ---
-      factor_buffer_months: 9 # 例如，最长因子需要8个月，设为9
+      start_date: "2017-08-01"
+      end_date: "2025-09-30"
+      # ...
+      factor_buffer_months: 9 # 因子缓冲期
 
     strategy:
       llm:
         default_universe: "All"
         default_top_n: 5
         
+        # --- 【新】多模型配置 ---
+        active_model: "qwen_max_model" # 在这里切换模型
+
+        api_providers:
+          deepseek_provider:
+            api_key_env: "DEEPSEEK_API_KEY"
+            base_url: "https://api.deepseek.com"
+          qwen_provider:
+            api_key_env: "DASHSCOPE_API_KEY"
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+        models:
+          deepseek_chat:
+            provider: "deepseek_provider"
+            model_name: "deepseek-chat"
+          qwen_plus_model:
+            provider: "qwen_provider"
+            model_name: "qwen-plus"
+          qwen_max_model:
+            provider: "qwen_provider"
+            model_name: "qwen-max"
+
         # --- 必需的因子配置 ---
         factors_to_use:
-          - 'momentum' # 需要 168 天 (~8个月)
+          - 'momentum'
           - 'breakout_quality_score'
           # ... 其他因子 ...
         
@@ -94,8 +116,9 @@ your_project_directory/
 
 6.  **配置环境变量 (必需):**
 
-      * 设置 `DEEPSEEK_API_KEY` (必需)。
-      * 设置 `DB_PASSWORD` (如果使用数据库，推荐)。
+      * 您**必须**为您在 `api_providers` 中定义的**所有** `api_key_env` 设置环境变量。
+      * 例如，同时设置 `DEEPSEEK_API_KEY` 和 `DASHSCOPE_API_KEY`。
+      * **重要**: 如果您在 Windows GUI 中设置了变量，**必须彻底重启 VS Code** 和您的终端，才能使新变量生效。
 
 ## 如何运行
 
@@ -107,10 +130,10 @@ your_project_directory/
 python run_backtest.py
 ```
 
-脚本将加载 `config.yaml`。`FactorEngine` 会自动计算 `factors_to_use` 列表中的所有因子，并将它们连同 `factor_explanations` 中的解释一起发送给 LLM。
+脚本将加载 `config.yaml`，`LLMStrategy` 会自动初始化 `active_model` 所指定的模型，`FactorEngine` 会自动计算 `factors_to_use` 列表中的所有因子。
 
 **通过命令行参数覆盖配置:**
-(这只会覆盖 `universe`, `top_n` 以及**期望的** `start`/`end` 日期。`factor_buffer_months` 和因子列表始终从 `config.yaml` 读取)
+(这只会覆盖 `universe`, `top_n` 以及**期望的** `start`/`end` 日期。`active_model` 和 `factors_to_use` 始终从 `config.yaml` 读取)
 
 ```bash
 # 运行 equity_global，期望从 2018 年开始，允许 AI 最多选择 3 支 ETF
@@ -127,9 +150,9 @@ python run_backtest.py --universe equity_global --start 2018-01-01 --topn 3
 
 **这意味着您的实际回测区间可能比您请求的要短，请务必留意运行初期的提示信息！**
 
-## 如何扩展 (添加新因子)
+## 如何扩展
 
-新的架构使得添加自定义因子变得非常容易：
+### 扩展 1：添加新因子
 
 1.  **定义因子**: 在 `llm_quant_lib/factor_definitions.py` 中，创建一个继承自 `BaseAlpha` 的新类，并实现 `predict()` 方法。
 2.  **注册因子**: 打开 `llm_quant_lib/factor_engine.py`，在顶部的 `FACTOR_REGISTRY` 字典中，添加一个新条目：
@@ -139,4 +162,21 @@ python run_backtest.py --universe equity_global --start 2018-01-01 --topn 3
 3.  **使用因子**: 打开 `config.yaml`，将 `'my_new_factor_name'` 添加到 `factors_to_use` 列表，并在 `factor_explanations` 中为 AI 添加一句解释。
 4.  **检查缓冲期**: 确保 `config.yaml` 中的 `factor_buffer_months` 足够覆盖您新因子的回看窗口。
 
-完成！下次运行 `run_backtest.py` 时，框架将自动计算并使用您的新因子。
+### 扩展 2：添加新 LLM 模型
+
+1.  **添加供应商 (如果需要)**: 如果是新供应商（比如 Moonshot），打开 `config.yaml`，在 `api_providers` 下添加一个新条目：
+    ```yaml
+    moonshot_provider:
+      api_key_env: "MOONSHOT_API_KEY"
+      base_url: "https://api.moonshot.cn/v1"
+    ```
+    (并确保设置了 `MOONSHOT_API_KEY` 环境变量)。
+2.  **添加模型**: 在 `models` 列表下添加新模型：
+    ```yaml
+    moonshot_v1_8k:
+      provider: "moonshot_provider" # 引用您刚添加的供应商
+      model_name: "moonshot-v1-8k"
+    ```
+3.  **激活模型**: 将 `active_model` 的值改为 `'moonshot_v1_8k'`。
+
+完成！下次运行 `run_backtest.py` 时，框架将自动使用新模型。
