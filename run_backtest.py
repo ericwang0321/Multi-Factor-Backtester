@@ -187,6 +187,20 @@ if __name__ == '__main__':
         
         # --- 【修正结束】 ---
 
+        if SELECTED_UNIVERSE.lower() == 'all' and COMPOSITE_BENCHMARK_CONFIG:
+            print("DataHandler: 正在加载综合基准...")
+            benchmark_df = data_handler.load_composite_benchmark_data(COMPOSITE_BENCHMARK_CONFIG)
+            if benchmark_df is None:
+                print("警告: 综合基准加载失败。")
+        elif BENCHMARK_DATA_PATH:
+            # 此时 BENCHMARK_DATA_PATH 是在 "阶段 2" 中设置的
+            print(f"DataHandler: 正在加载单一基准: {BENCHMARK_DATA_PATH}")
+            benchmark_df = data_handler.load_benchmark_data(BENCHMARK_DATA_PATH)
+            if benchmark_df is None:
+                print(f"警告: 基准 {BENCHMARK_DATA_PATH} 加载失败。")
+        else:
+            print(f"DataHandler: 未找到基准配置，将不加载基准数据。")
+
         # 打印加载的数据范围保持不变
         print(f"数据加载完毕。完整加载范围: {raw_df['datetime'].min().date()} 到 {raw_df['datetime'].max().date()} (用于因子计算)")
 
