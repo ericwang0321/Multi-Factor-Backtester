@@ -36,7 +36,7 @@ paths:
 # --- 回测核心参数 ---
 backtest:
   start_date: "2017-08-01" # 默认开始日期
-  end_date: "2025-09-30"   # 默认结束日期
+  end_date: "2018-09-30"   # 默认结束日期
   initial_capital: 1000000 # 初始资金
   commission_rate: 0.001   # 手续费率
   slippage: 0.0005         # 滑点率
@@ -50,8 +50,6 @@ strategy:
     default_universe: "equity_us"
     default_top_n: 5
     # API Key: 必须通过环境变量 DEEPSEEK_API_KEY 提供，此处不配置!
-
-    # --- 【【核心修改点 v2：模型供应商配置】】 ---
 
     # 1. 在这里选择您想运行的【具体模型】的名称 (从下面的 models 列表中选择一个)
     # active_model: "deepseek_chat" 
@@ -97,9 +95,6 @@ strategy:
         provider: "qwen_provider"
         model_name: "qwen-turbo"        # Qwen Turbo 模型
 
-    # --- 【【修改结束】】 ---
-
-    # --- 【核心修改点】 ---
     # 替换为您新因子库中的因子名称
     factors_to_use:
       - 'momentum'
