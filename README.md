@@ -17,11 +17,11 @@ your_project_directory/
 ├── llm_quant_lib/           # 核心量化库
 │   ├── __init__.py
 │   ├── data_handler.py      # 数据加载器
-│   ├── factor_definitions.py # 【新】所有因子(BaseAlpha)的计算逻辑
-│   ├── factor_engine.py     # 【新】因子引擎 (调用 factor_definitions.py)
-│   ├── strategy.py          # 【新】策略 (从配置动态读取因子和模型)
+│   ├── factor_definitions.py # 所有因子(BaseAlpha)的计算逻辑
+│   ├── factor_engine.py     # 因子引擎 (调用 factor_definitions.py)
+│   ├── strategy.py          # 策略 (从配置动态读取因子和模型)
 │   ├── portfolio.py         # 投资组合/交易执行
-│   ├── backtest_engine.py   # 【新】回测引擎 (连接策略和因子引擎)
+│   ├── backtest_engine.py   # 回测引擎 (连接策略和因子引擎)
 │   └── performance.py       # 性能分析
 │
 ├── data/                    # 数据文件存储目录
@@ -35,7 +35,7 @@ your_project_directory/
 ├── logs/                    # 保存 AI 决策日志和持仓记录
 ├── requirements.txt         # Python 依赖库列表
 ├── config.yaml              # 【重要】项目配置文件
-└── run_backtest.py          # 【新】主运行脚本 (含日期调整逻辑)
+└── run_backtest.py          # 主运行脚本 (含日期调整逻辑)
 ```
 
 ## 设置步骤
@@ -113,12 +113,72 @@ your_project_directory/
           'breakout_quality_score': '突破质量分。值越高越好。'
           # ... 其他解释 ...
     ```
+    
+6.  **配置环境变量 (关键步骤)**
 
-6.  **配置环境变量 (必需):**
+    您**必须**为您在 `api_providers` 中定义的**所有** `api_key_env` 设置环境变量。例如，如果您在配置中启用了 `deepseek` 和 `dashscope`，您就必须设置 `DEEPSEEK_API_KEY` 和 `DASHSCOPE_API_KEY`。
 
-      * 您**必须**为您在 `api_providers` 中定义的**所有** `api_key_env` 设置环境变量。
-      * 例如，同时设置 `DEEPSEEK_API_KEY` 和 `DASHSCOPE_API_KEY`。
-      * **重要**: 如果您在 Windows GUI 中设置了变量，**必须彻底重启 VS Code** 和您的终端，才能使新变量生效。
+    环境变量是**私密**的，不应提交到 Git 仓库。以下是不同操作系统的设置方法：
+
+    ### 方式一：Windows 系统
+
+    1.  **通过图形界面 (GUI) - 推荐**
+        * 在 Windows 搜索栏搜索“环境变量”（或 “Edit the system environment variables”）。
+        * 点击“环境变量...”按钮。
+        * 在“XXX 的用户变量”或“系统变量”下点击“新建...”。
+        * **变量名**填入 `DEEPSEEK_API_KEY`，**变量值**填入您的 API 密钥。
+        * 一路点击“确定”保存。
+        * **[图文教程]** 详细的步骤可以参考这篇指南：[Windows 10/11 设置环境变量详解 (知乎)](https://zhuanlan.zhihu.com/p/231668109)
+
+    2.  **通过命令行 (PowerShell)**
+        * **永久设置 (推荐):**
+          ```powershell
+          [Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "your_key_here", "User")
+          ```
+        * 通过此方法设置后，您需要**重启终端或 VS Code**才能使其生效。
+
+    ### 方式二：macOS / Linux 系统
+
+    1.  打开您的终端 (Terminal)。
+    2.  确定您使用的 Shell 类型 (通常是 Zsh 或 Bash)。
+        * 如果是 Zsh (macOS 默认)，编辑 `~/.zshrc` 文件：
+          ```bash
+          nano ~/.zshrc
+          ```
+        * 如果是 Bash，编辑 `~/.bash_profile` 或 `~/.bashrc` 文件：
+          ```bash
+          nano ~/.bash_profile
+          ```
+    3.  在文件的末尾添加以下内容 (以 DeepSeek 和 DashScope 为例)：
+        ```bash
+        export DEEPSEEK_API_KEY="your_key_here"
+        export DASHSCOPE_API_KEY="your_other_key_here"
+        ```
+    4.  保存文件并退出 (在 `nano` 中是 `Ctrl+X`, `Y`, `Enter`)。
+    5.  让配置立即生效（或直接重启终端）：
+        ```bash
+        source ~/.zshrc  # 或者 source ~/.bash_profile
+        ```
+
+    ### 方式三：使用 `.env` 文件 (推荐用于项目)
+
+    如果您不希望设置全局环境变量，可以在本项目的根目录（与 `README.md` 同级）创建一个名为 `.env` 的文件。
+
+    1.  创建 `.env` 文件。
+    2.  在该文件中添加您的密钥：
+        ```
+        DEEPSEEK_API_KEY="your_key_here"
+        DASHSCOPE_API_KEY="your_other_key_here"
+        ```
+    3.  **[安全]** 确保您的 `.gitignore` 文件中包含了 `.env` 这一行，防止密钥泄露。
+    4.  *(假设)* 脚本主程序中已包含加载 `.env` 文件的代码 (例如使用 `python-dotenv` 库的 `load_dotenv()`)。此方法通常无需重启。
+
+    -----
+
+    ### **!! 重启生效提醒 !!**
+
+    * **重要**: 如果您使用了**方法一 (Windows GUI)** 来设置变量，您**必须彻底重启 VS Code 和您的终端**，才能使新变量生效。仅仅重启终端窗口是不够的。
+    * 如果您在 VS Code 内置的终端中运行，**重启 VS Code** 是最保险的生效方式。
 
 ## 如何运行
 
