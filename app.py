@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px  
 import yaml
 import os
+import io  # 【新增】用于处理内存中的文件流
 from datetime import datetime
 
 # Core framework imports
@@ -14,7 +15,7 @@ from llm_quant_lib.performance import calculate_extended_metrics
 
 # --- Page Setup ---
 st.set_page_config(page_title="Multi-Factor Backtest App", layout="wide")
-st.title("Quantitative Strategy Explorer")
+st.title("🚀 Quantitative Strategy Explorer")
 
 # --- Resource Caching ---
 @st.cache_resource
@@ -60,7 +61,7 @@ with st.sidebar:
             )
             factor_weights[factor] = weight
 
-    # 3. Transaction Cost Settings (交互式成本设置)
+    # 3. Transaction Cost Settings
     st.divider()
     st.header("Transaction Costs")
     comm_rate = st.number_input("Commission Rate", 0.0, 0.01, 0.001, format="%.4f")
@@ -123,15 +124,33 @@ if run_btn:
         m_col3.metric("Sharpe", f"{metrics.get('夏普比率', 0):.2f}")
         m_col4.metric("Max Drawdown", f"{metrics.get('最大回撤', 0):.2%}")
 
-        # 交易成本归因看板
+        # 交易成本归因看板 (使用 $ 符号)
         st.divider()
         st.subheader("Transaction Cost Attribution")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Cost", f"¥{metrics.get('总交易成本', 0):,.0f}")
-        c2.metric("Commission", f"¥{metrics.get('累计佣金支出', 0):,.0f}")
-        c3.metric("Slippage", f"¥{metrics.get('累计滑点支出', 0):,.0f}")
+        c1.metric("Total Cost", f"${metrics.get('总交易成本', 0):,.0f}")
+        c2.metric("Commission", f"${metrics.get('累计佣金支出', 0):,.0f}")
+        c3.metric("Slippage", f"${metrics.get('累计滑点支出', 0):,.0f}")
         drag = metrics.get('交易成本对收益损耗', 0)
         c4.metric("Return Drag", f"-{drag:.2%}", delta_color="inverse")
+
+        # 【新增】导出 Excel 报告逻辑
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            # 写入指标
+            pd.DataFrame.from_dict(metrics, orient='index', columns=['Value']).to_excel(writer, sheet_name='Summary_Metrics')
+            # 写入交易日志
+            strategy.get_trade_log().to_excel(writer, sheet_name='Trade_Log', index=False)
+            # 写入持仓历史
+            final_portfolio.get_holdings_history().to_excel(writer, sheet_name='Holdings_History', index=False)
+        
+        st.download_button(
+            label="📥 Download Excel Report",
+            data=buffer.getvalue(),
+            file_name=f"Backtest_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
         # 归因可视化图表
         col_pie, col_bar = st.columns(2)
@@ -162,7 +181,7 @@ if run_btn:
         fig.update_layout(hovermode="x unified", template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 【核心修改】Data Detail Tabs: 增加相关性分析选项卡
+        # Data Detail Tabs
         t1, t2, t3, t4 = st.tabs(["Performance Metrics", "Decision Log", "Holdings", "Factor Correlation"])
         
         with t1:
@@ -172,16 +191,12 @@ if run_btn:
         with t3:
             st.dataframe(final_portfolio.get_holdings_history(), use_container_width=True)
         
-        # 【新增】因子相关性热力图逻辑
         with t4:
             st.subheader("Factor Cross-Correlation Matrix")
             factor_series_list = []
-            
-            # 从缓存中提取数据并展平
             for f_name in selected_factors:
                 if f_name in engine.factor_engine._factor_cache:
                     f_df = engine.factor_engine._factor_cache[f_name]
-                    # 仅选择回测时间窗口内的数据并 stack 展平为一列
                     f_stacked = f_df.loc[start_date.strftime('%Y-%m-%d'):end_date.strftime('%Y-%m-%d')].stack()
                     f_stacked.name = f_name
                     factor_series_list.append(f_stacked)
@@ -189,17 +204,14 @@ if run_btn:
             if len(factor_series_list) > 1:
                 all_factors_df = pd.concat(factor_series_list, axis=1)
                 corr_matrix = all_factors_df.corr()
-                
-                # 绘制交互式热力图
                 fig_corr = px.imshow(
                     corr_matrix,
                     text_auto=".2f",
-                    color_continuous_scale='RdBu_r', # 红蓝色调，适合观察正负相关
+                    color_continuous_scale='RdBu_r', 
                     zmin=-1, zmax=1,
                     title="Factor Correlation Heatmap"
                 )
                 st.plotly_chart(fig_corr, use_container_width=True)
-                st.info("💡 Tip: Selecting low-correlation factors (<0.3) typically improves portfolio robustness.")
             else:
                 st.warning("Please select at least two factors to analyze correlation.")
 
