@@ -166,7 +166,7 @@ class FactorEngine:
             """将多重索引的宽格式 DataFrame 转换为 xarray.DataArray"""
             if not isinstance(wide_df.columns, pd.MultiIndex):
                 raise ValueError("输入必须是 MultiIndex DataFrame")
-            stacked = wide_df.stack(level='sec_code')
+            stacked = wide_df.stack(level='sec_code', future_stack=True)
             stacked.index.names = ['datetime', 'sec_code']
             stacked.columns.name = 'field'
             return stacked.to_xarray().to_array('field')

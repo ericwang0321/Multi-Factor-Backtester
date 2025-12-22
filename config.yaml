@@ -1,128 +1,28 @@
-# LLM 量化回测框架 - 配置文件
-
-# --- 数据库连接 (可选, 如果需要从数据库加载) ---
-database:
-  use_db: false # 设为 true 以启用数据库加载 (如果 CSV 不存在)
-  username: "intern52" # 或 ${DB_USER} 如果你想从环境变量读取
-  password: "${DB_PASSWORD}" # 强烈建议从环境变量读取!
-  host: "10.26.132.99" # 或 ${DB_HOST}
-  port: "5432" # 或 ${DB_PORT}
-  database: "datalake" # 或 ${DB_NAME}
-
-# --- 文件路径 ---
+# 路径配置
 paths:
-  # 输入数据
   price_data_csv: "data/processed/price_with_simple_returns_2016_onwards.csv"
   universe_definition: "data/reference/sec_code_category_grouped.csv"
-  # 基准文件映射 (key 是 universe 名称, value 是 processed 目录下的文件名)
-  benchmark_mapping:
-    equity_us: "spxt_index_daily_return.csv"
-    equity_global: "mxwd_index_daily_return.csv"
-    bond: "global_bond_index_daily_return.csv"
-    commodity: "bcom_index_daily_return.csv"
-    alternative: "bcom_index_daily_return.csv"
-  # 综合基准配置 (用于 'All' universe)
-  composite_benchmark:
-    benchmarks:
-      spxt_index_daily_return.csv: 0.30
-      mxwd_index_daily_return.csv: 0.30
-      global_bond_index_daily_return.csv: 0.30
-      bcom_index_daily_return.csv: 0.10
-    display_name: "Composite (30/30/30/10 Eq_US/Eq_Gl/Bond/Comm)"
-  # 输出目录
   plot_dir_base: "plots"
   log_dir_base: "logs"
 
-# --- 回测核心参数 ---
+# 回测基础参数
 backtest:
-  start_date: "2017-08-01" # 默认开始日期
-  end_date: "2018-09-30"   # 默认结束日期
-  initial_capital: 1000000 # 初始资金
-  commission_rate: 0.001   # 手续费率
-  slippage: 0.0005         # 滑点率
-  rebalance_months: 1      # 调仓频率 (月)
-  factor_buffer_months: 5  # 因子计算缓冲期(月)，确保长周期因子在回测开始时有值
+  start_date: "2018-01-01"
+  end_date: "2024-07-31"
+  initial_capital: 1000000
+  commission_rate: 0.001
+  slippage: 0.0005
+  rebalance_days: 20        # 【新增】每隔 20 个交易日调仓 (约 1 个月)
+  rebalance_months: 1       # 【保留】若 rebalance_days 设为 null 则按月调仓
+  factor_buffer_months: 12  # 因子计算缓冲期
 
-# --- 策略配置 ---
+# 策略配置
 strategy:
-  # LLM 策略配置
-  llm:
-    default_universe: "equity_us"
-    default_top_n: 5
-    # API Key: 必须通过环境变量 DEEPSEEK_API_KEY 提供，此处不配置!
+  factor_strategy:
+    universe_to_trade: "All"  # 可选具体资产池名称
+    factor_name: "trend_score" # 【关键】输入 factor_definitions.py 中注册的因子名
+    top_n: 5                  # 持仓 ETF 数量
+    ascending: False          # False 表示因子值越大越好 (Score 降序)
 
-    # 1. 在这里选择您想运行的【具体模型】的名称 (从下面的 models 列表中选择一个)
-    # active_model: "deepseek_chat" 
-    active_model: "qwen_max_model" # 比如, 您可以改成这个来切换
-
-    # 2. 定义 API 供应商 (Provider)
-    # 仅包含 API Key 和 Base URL
-    api_providers:
-      deepseek_provider:
-        api_key_env: "DEEPSEEK_API_KEY"   # 读取这个环境变量
-        base_url: "https://api.deepseek.com"
-      
-      qwen_provider:
-        api_key_env: "DASHSCOPE_API_KEY"   # 读取这个新的环境变量
-        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      
-      # qwen_sg_provider: # 新加坡地域示例
-      #   api_key_env: "DASHSCOPE_API_KEY"
-      #   base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-
-    # 3. 定义具体的【模型】
-    # 每个模型引用一个 "provider"，并指定自己的 "model_name"
-    models:
-      # DeepSeek 模型
-      deepseek_chat:
-        provider: "deepseek_provider"   # 引用上面的 deepseek_provider
-        model_name: "deepseek-chat"     # DeepSeek 使用的模型名称
-      
-      # deepseek_coder: # 示例：如何添加另一个 DeepSeek 模型
-      #   provider: "deepseek_provider"
-      #   model_name: "deepseek-coder" 
-
-      # Qwen 模型
-      qwen_plus_model:
-        provider: "qwen_provider"       # 引用上面的 qwen_provider
-        model_name: "qwen-plus"         # Qwen Plus 模型
-      
-      qwen_max_model:
-        provider: "qwen_provider"
-        model_name: "qwen-max"          # Qwen Max 模型
-        
-      qwen_turbo_model:
-        provider: "qwen_provider"
-        model_name: "qwen-turbo"        # Qwen Turbo 模型
-
-    # 替换为您新因子库中的因子名称
-    factors_to_use:
-      - 'momentum'
-      - 'breakout_quality_score'
-      - 'eric_adx_weighted_momentum'
-      - 'amount_std'
-      - 'smart_momentum_adx_r2'
-      - 'eric_tail_skew'
-      # - 'ht_low_vol_breakout' # 您也可以添加这个
-      # - 'probabilistic_trend_rsrs' # 或者这个
-
-    # 同样，更新这里的解释，以便 AI 理解它们
-    factor_explanations:
-      'momentum': '168日价格动量 (总收益率)。'
-      'breakout_quality_score': '突破质量分。结合了动量、市场参与度（换手率）和前期稳定性（低波动）。'
-      'eric_adx_weighted_momentum': 'ADX加权动量。使用ADX趋势强度来调节动量信号。'
-      'amount_std': '42日成交额标准差。'
-      'smart_momentum_adx_r2': '智慧动量。基础动量 * (ADX趋势概率 * R-squared稳定性)。'
-      'eric_tail_skew': '经验极端口概率偏度。测量近期极端收益的偏斜程度（反转信号）。'
-    # --- 【修改结束】 ---
-
-# 如果你想添加静态策略作为对比，可以在这里配置
-# static:
-#   default_universe: "equity_us"
-#   default_top_n: 3
-#   normalization: "rank"
-#   factor_weights:
-#     equity_us:
-#       factors: ["monthly_std_overnight_return", "eric_multi_dim_reversal"]
-#       weights: [0.5, -0.5]
-#     # 可以为其他 universe 添加配置
+# 因子列表 (供参考，确保 FactorEngine 的 REGISTRY 中有这些)
+# 可选: alpha001, momentum, trend_score, volatility, turnover_mean 等

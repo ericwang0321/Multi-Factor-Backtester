@@ -174,7 +174,7 @@ def calculate_extended_metrics(
     # 月度指标
     # ---【健壮性】确保索引唯一且排序 ---
     portfolio_equity_unique = portfolio_equity[~portfolio_equity.index.duplicated(keep='last')].sort_index()
-    monthly_equity = portfolio_equity_unique.resample('M').last() # 使用 'M' (Month End)
+    monthly_equity = portfolio_equity_unique.resample('ME').last() # 使用 'M' (Month End)
     win_rate_monthly: float = np.nan # 默认为 NaN
     profit_loss_ratio: float = np.nan # 默认为 NaN
     if len(monthly_equity) >= 2:
