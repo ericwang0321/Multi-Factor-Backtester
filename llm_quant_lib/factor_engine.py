@@ -218,55 +218,51 @@ class FactorEngine:
             return self._factor_cache[factor_name]
 
     def get_factor_snapshot(self, current_date: pd.Timestamp, codes: List[str], factors: List[str]) -> pd.DataFrame:
-        """
-        【公共接口】获取指定日期、指定代码、指定因子的截面快照。
-        (此函数的接口与旧版完全兼容)
-        
-        Args:
-            current_date (pd.Timestamp): 需要获取快照的日期 (决策日, t-1)。
-            codes (List[str]): 需要包含在快照中的证券代码列表。
-            factors (List[str]): 需要计算的因子名称列表 (来自 config.yaml)。
-
-        Returns:
-            pd.DataFrame: 包含指定日期、指定代码的因子值的 DataFrame (索引: sec_code, 列: 因子名称)。
-        """
-        snapshot_series_list: List[pd.Series] = []
-        
-        # 1. 遍历所有需要的因子
-        for factor_name in factors:
-            # 2. 检查因子是否已计算并缓存
-            if factor_name not in self._factor_cache:
-                # 如果不在缓存中，立即计算其全时间序列并缓存
-                self._compute_and_cache_factor(factor_name)
+            """
+            Retrieves a cross-sectional snapshot of factors. 
+            If multiple factors are provided, it calculates a normalized composite score.
+            """
+            snapshot_series_list: List[pd.Series] = []
+            
+            # 1. Calculate or retrieve each factor from cache
+            for factor_name in factors:
+                if factor_name not in self._factor_cache:
+                    self._compute_and_cache_factor(factor_name)
+                    
+                factor_df = self._factor_cache[factor_name]
                 
-            # 3. 从缓存中提取全序列
-            factor_df = self._factor_cache[factor_name]
+                if factor_df.empty or current_date not in factor_df.index:
+                    daily_series = pd.Series(index=codes, dtype=float, name=factor_name)
+                else:
+                    daily_series = factor_df.loc[current_date]
+                    daily_series = daily_series[daily_series.index.intersection(codes)]
+                
+                daily_series.name = factor_name
+                snapshot_series_list.append(daily_series)
+
+            if not snapshot_series_list:
+                return pd.DataFrame(index=pd.Index(codes, name='sec_code'))
+
+            # 2. Combine into a single DataFrame
+            snapshot_df = pd.concat(snapshot_series_list, axis=1)
+            snapshot_df.index.name = 'sec_code'
+            snapshot_df = snapshot_df.reindex(codes)
+
+            # 3. Handle Multi-Factor Normalization and Combination
+            if len(factors) > 1:
+                # Calculate Z-score for each factor column: (x - mean) / std
+                # This aligns different factors (e.g., volume vs. returns) to the same scale
+                z_scored_df = snapshot_df[factors].apply(
+                    lambda x: (x - x.mean()) / x.std() if x.std() != 0 else x - x.mean()
+                )
+                
+                # Fill NaNs with 0 (neutral score) after normalization
+                z_scored_df = z_scored_df.fillna(0.0)
+                
+                # Create the composite score by averaging all normalized factors
+                snapshot_df['composite_score'] = z_scored_df.mean(axis=1)
             
-            # 4. 从全序列中提取当天的截面
-            if factor_df.empty or current_date not in factor_df.index:
-                # print(f"FactorEngine: 警告 - 在 {current_date.date()} 因子 '{factor_name}' 无数据。")
-                # 创建一个空 Series 以保持 DataFrame 结构
-                daily_series = pd.Series(index=codes, dtype=float, name=factor_name)
-            else:
-                daily_series = factor_df.loc[current_date]
-                # 只保留需要的 codes
-                daily_series = daily_series[daily_series.index.intersection(codes)]
-            
-            daily_series.name = factor_name
-            snapshot_series_list.append(daily_series)
+            # 4. Final fill for the output DataFrame
+            snapshot_df_filled = snapshot_df.fillna(0.0)
 
-        if not snapshot_series_list:
-             print(f"FactorEngine: 警告 - 在 {current_date.date()} 未找到任何因子数据。")
-             return pd.DataFrame(index=pd.Index(codes, name='sec_code'))
-
-        # 5. 将所有因子的 Series 合并成一个 DataFrame
-        snapshot_df = pd.concat(snapshot_series_list, axis=1)
-        snapshot_df.index.name = 'sec_code'
-
-        # 6. 确保所有请求的 codes 都在索引中 (用 NaN 填充)
-        snapshot_df = snapshot_df.reindex(codes)
-
-        # 7. 因子值预处理 (AI 不喜欢 NaN)
-        snapshot_df_filled = snapshot_df.fillna(0.0)
-
-        return snapshot_df_filled
+            return snapshot_df_filled

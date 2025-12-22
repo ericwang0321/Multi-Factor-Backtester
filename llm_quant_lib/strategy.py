@@ -44,42 +44,61 @@ class FactorTopNStrategy(BaseStrategy):
         """告诉引擎需要计算哪个因子"""
         return [self.factor_name]
 
+class FactorTopNStrategy(BaseStrategy):
+    """
+    [Multi-Factor Top-N Strategy]
+    Logic: Ranks assets based on a composite score derived from multiple factors.
+    """
+    def __init__(self, universe_df: pd.DataFrame, **kwargs):
+        super().__init__(universe_df, **kwargs)
+        # NEW: Accepts a list of factors instead of a single string
+        self.factor_names = kwargs.get('factor_names', []) 
+        self.top_n = kwargs.get('top_n', 5)
+        self.ascending = kwargs.get('ascending', False)
+        self.universe_to_trade = kwargs.get('universe_to_trade', 'All')
+
+        if not self.factor_names:
+            raise ValueError("FactorTopNStrategy: 'factor_names' list cannot be empty.")
+        
+        self.trade_log: List[Dict] = []
+
+    def get_required_factors(self) -> List[str]:
+        """Returns the list of all factors needed for the composite score."""
+        return self.factor_names
+
     def get_target_weights(self, current_date: pd.Timestamp, factor_snapshot: pd.DataFrame, portfolio_state: dict) -> Dict[str, float]:
         """
-        基于因子截面数据进行排序选股
+        Ranks assets based on the 'composite_score' provided by the FactorEngine.
         """
-        # 1. 筛选资产池范围内的因子数据
         if self.universe_to_trade.lower() == 'all':
             assets_in_scope = factor_snapshot.index.tolist()
         else:
             assets_in_scope = self.universe_df[self.universe_df['universe'] == self.universe_to_trade]['sec_code'].tolist()
         
-        # 2. 提取因子快照并排序
-        if self.factor_name not in factor_snapshot.columns:
+        # Use 'composite_score' if multiple factors exist, else use the single factor name
+        target_col = 'composite_score' if len(self.factor_names) > 1 else self.factor_names[0]
+
+        if target_col not in factor_snapshot.columns:
             return {}
 
-        # 仅针对范围内资产进行排序
-        relevant_scores = factor_snapshot.loc[factor_snapshot.index.isin(assets_in_scope), self.factor_name]
-        relevant_scores = relevant_scores.dropna() # 剔除无因子值的资产
+        relevant_scores = factor_snapshot.loc[factor_snapshot.index.isin(assets_in_scope), target_col]
+        relevant_scores = relevant_scores.dropna()
 
         if relevant_scores.empty:
             return {}
 
-        # 3. 排序并选取前 N 名
-        # ascending=False 代表降序（因子值大排前面）
+        # Sort and select Top N
         top_assets = relevant_scores.sort_values(ascending=self.ascending).head(self.top_n)
         
-        # 4. 计算等权重
         if not top_assets.empty:
             weight = 1.0 / len(top_assets)
             target_weights = {code: weight for code in top_assets.index}
         else:
             target_weights = {}
 
-        # 5. 记录日志 (用于后续 App 展示)
         self.trade_log.append({
             "date": current_date,
-            "justification": f"基于因子 '{self.factor_name}' 选出 Top {len(target_weights)} 资产。",
+            "justification": f"Selected Top {len(target_weights)} assets using {target_col}.",
             "selected_assets": list(target_weights.keys()),
             "final_weights": target_weights
         })
