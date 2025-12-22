@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px  
 import yaml
 import os
-import io  # 【新增】用于处理内存中的文件流
+import io  
 from datetime import datetime
 
 # Core framework imports
@@ -15,7 +15,7 @@ from llm_quant_lib.performance import calculate_extended_metrics
 
 # --- Page Setup ---
 st.set_page_config(page_title="Multi-Factor Backtest App", layout="wide")
-st.title("🚀 Quantitative Strategy Explorer")
+st.title("Quantitative Strategy Explorer")
 
 # --- Resource Caching ---
 @st.cache_resource
@@ -36,42 +36,28 @@ with st.sidebar:
     st.header("Strategy parameters")
     dh, config = load_framework('config.yaml')
     
-    # 1. Factor Selection
     available_factors = [
         'trend_score', 'momentum', 'volatility', 'turnover_mean', 
         'alpha001', 'breakout_quality_score', 'rsi', 'stochastic_k',
         'amount_mean', 'amihud_illiquidity'
     ]
-    selected_factors = st.multiselect(
-        "Select Factors", 
-        available_factors, 
-        default=['trend_score', 'momentum']
-    )
+    selected_factors = st.multiselect("Select Factors", available_factors, default=['trend_score', 'momentum'])
     
-    # 2. Dynamic Weight Inputs
     factor_weights = {}
     if selected_factors:
         st.write("Set Factor Weights:")
         for factor in selected_factors:
-            weight = st.number_input(
-                f"Weight: {factor}", 
-                min_value=0.0, max_value=1.0, 
-                value=1.0/len(selected_factors), 
-                step=0.05
-            )
+            weight = st.number_input(f"Weight: {factor}", 0.0, 1.0, 1.0/len(selected_factors), 0.05)
             factor_weights[factor] = weight
 
-    # 3. Transaction Cost Settings
     st.divider()
     st.header("Transaction Costs")
     comm_rate = st.number_input("Commission Rate", 0.0, 0.01, 0.001, format="%.4f")
     slip_rate = st.number_input("Slippage Rate", 0.0, 0.01, 0.0005, format="%.4f")
 
-    # 4. Execution Parameters
     rebalance_days = st.slider("Rebalance Frequency (Trading Days)", 1, 60, 20)
     top_n = st.number_input("Top N Selection", 1, 15, 5)
     
-    # 5. Dates
     col_start, col_end = st.columns(2)
     start_date = col_start.date_input("Start", datetime(2018, 1, 1))
     end_date = col_end.date_input("End", datetime(2024, 7, 31))
@@ -92,128 +78,83 @@ if run_btn:
 
         with st.spinner('Running multi-factor simulation...'):
             u_df = dh.load_universe_data(config['paths']['universe_definition'])
-            
-            strategy = FactorTopNStrategy(
-                universe_df=u_df,
-                factor_weights=factor_weights,
-                top_n=top_n,
-                ascending=False
-            )
-            
-            engine = BacktestEngine(
-                start_date=start_date.strftime('%Y-%m-%d'),
-                end_date=end_date.strftime('%Y-%m-%d'),
-                config=bt_config,
-                strategy=strategy,
-                data_handler=dh
-            )
+            strategy = FactorTopNStrategy(universe_df=u_df, factor_weights=factor_weights, top_n=top_n, ascending=False)
+            engine = BacktestEngine(start_date=start_date.strftime('%Y-%m-%d'), end_date=end_date.strftime('%Y-%m-%d'),
+                                   config=bt_config, strategy=strategy, data_handler=dh)
             
             engine.factor_engine.current_weights = factor_weights 
             equity_df, final_portfolio = engine.run()
             
-            metrics = calculate_extended_metrics(
-                portfolio_equity=equity_df['total_value'],
-                benchmark_equity=equity_df['total_value'],
-                portfolio_instance=final_portfolio
-            )
+            metrics = calculate_extended_metrics(equity_df['total_value'], equity_df['total_value'], final_portfolio)
 
-        # --- Visualization ---
+        # --- Dashboard Metrics ---
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         m_col1.metric("Total Return", f"{metrics.get('总回报率', 0):.2%}")
         m_col2.metric("Annual Return", f"{metrics.get('年化回报率', 0):.2%}")
         m_col3.metric("Sharpe", f"{metrics.get('夏普比率', 0):.2f}")
         m_col4.metric("Max Drawdown", f"{metrics.get('最大回撤', 0):.2%}")
 
-        # 交易成本归因看板 (使用 $ 符号)
         st.divider()
         st.subheader("Transaction Cost Attribution")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Cost", f"${metrics.get('总交易成本', 0):,.0f}")
         c2.metric("Commission", f"${metrics.get('累计佣金支出', 0):,.0f}")
         c3.metric("Slippage", f"${metrics.get('累计滑点支出', 0):,.0f}")
-        drag = metrics.get('交易成本对收益损耗', 0)
-        c4.metric("Return Drag", f"-{drag:.2%}", delta_color="inverse")
+        c4.metric("Return Drag", f"-{metrics.get('交易成本对收益损耗', 0):.2%}", delta_color="inverse")
 
-        # 【新增】导出 Excel 报告逻辑
+        # --- Export Excel (最小改动：过滤 Series) ---
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            # 写入指标
-            pd.DataFrame.from_dict(metrics, orient='index', columns=['Value']).to_excel(writer, sheet_name='Summary_Metrics')
-            # 写入交易日志
-            strategy.get_trade_log().to_excel(writer, sheet_name='Trade_Log', index=False)
-            # 写入持仓历史
-            final_portfolio.get_holdings_history().to_excel(writer, sheet_name='Holdings_History', index=False)
+            # 仅写入数值型指标
+            clean_metrics = {k: v for k, v in metrics.items() if not isinstance(v, pd.Series)}
+            pd.DataFrame.from_dict(clean_metrics, orient='index', columns=['Value']).to_excel(writer, sheet_name='Summary')
+            strategy.get_trade_log().to_excel(writer, sheet_name='Trades', index=False)
+            final_portfolio.get_holdings_history().to_excel(writer, sheet_name='Holdings', index=False)
         
-        st.download_button(
-            label="📥 Download Excel Report",
-            data=buffer.getvalue(),
-            file_name=f"Backtest_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        st.download_button(label="📥 Download Excel Report", data=buffer.getvalue(), 
+                          file_name=f"Backtest_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-        # 归因可视化图表
-        col_pie, col_bar = st.columns(2)
-        with col_pie:
-            cost_df = pd.DataFrame({
-                'Component': ['Commission', 'Slippage'],
-                'Amount': [metrics.get('累计佣金支出', 0), metrics.get('累计滑点支出', 0)]
-            })
-            fig_pie = px.pie(cost_df, values='Amount', names='Component', title="Cost Breakdown", hole=0.4)
-            st.plotly_chart(fig_pie, use_container_width=True)
-        with col_bar:
-            comparison_df = pd.DataFrame({
-                'Type': ['Actual Return', 'Theoretical (No Cost)'],
-                'Value': [metrics.get('总回报率', 0) * 100, metrics.get('理论无成本总回报', 0) * 100]
-            })
-            fig_bar = px.bar(comparison_df, x='Type', y='Value', text_auto='.2f', 
-                             title="Actual vs Theoretical Return (%)", color='Type')
-            st.plotly_chart(fig_bar, use_container_width=True)
-
+        # --- Main Chart ---
         st.divider()
         st.subheader("Equity Curve")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=equity_df.index, y=equity_df['total_value'], 
-            name='Equity Curve',
-            line=dict(color='#00d1b2', width=2)
-        ))
+        fig.add_trace(go.Scatter(x=equity_df.index, y=equity_df['total_value'], name='Equity Curve', line=dict(color='#00d1b2', width=2)))
         fig.update_layout(hovermode="x unified", template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Data Detail Tabs
-        t1, t2, t3, t4 = st.tabs(["Performance Metrics", "Decision Log", "Holdings", "Factor Correlation"])
+        # --- Tabs (新增 Risk Analysis) ---
+        t1, t2, t3, t4, t5 = st.tabs(["Performance", "Signals", "Holdings", "Factor Correlation", "Risk Analysis"])
         
         with t1:
-            st.table(pd.DataFrame.from_dict(metrics, orient='index', columns=['Value']).astype(str))
+            # 过滤掉绘图用的 Series 后显示表格
+            st.table(pd.DataFrame.from_dict({k: v for k, v in metrics.items() if not isinstance(v, pd.Series)}, 
+                                           orient='index', columns=['Value']).astype(str))
         with t2:
             st.dataframe(strategy.get_trade_log(), use_container_width=True)
         with t3:
             st.dataframe(final_portfolio.get_holdings_history(), use_container_width=True)
-        
         with t4:
-            st.subheader("Factor Cross-Correlation Matrix")
-            factor_series_list = []
-            for f_name in selected_factors:
-                if f_name in engine.factor_engine._factor_cache:
-                    f_df = engine.factor_engine._factor_cache[f_name]
-                    f_stacked = f_df.loc[start_date.strftime('%Y-%m-%d'):end_date.strftime('%Y-%m-%d')].stack()
-                    f_stacked.name = f_name
-                    factor_series_list.append(f_stacked)
-            
-            if len(factor_series_list) > 1:
-                all_factors_df = pd.concat(factor_series_list, axis=1)
-                corr_matrix = all_factors_df.corr()
-                fig_corr = px.imshow(
-                    corr_matrix,
-                    text_auto=".2f",
-                    color_continuous_scale='RdBu_r', 
-                    zmin=-1, zmax=1,
-                    title="Factor Correlation Heatmap"
-                )
-                st.plotly_chart(fig_corr, use_container_width=True)
-            else:
-                st.warning("Please select at least two factors to analyze correlation.")
+            st.subheader("Factor Cross-Correlation")
+            factor_list = []
+            for f in selected_factors:
+                if f in engine.factor_engine._factor_cache:
+                    s = engine.factor_engine._factor_cache[f].loc[start_date.strftime('%Y-%m-%d'):end_date.strftime('%Y-%m-%d')].stack()
+                    s.name = f
+                    factor_list.append(s)
+            if len(factor_list) > 1:
+                st.plotly_chart(px.imshow(pd.concat(factor_list, axis=1).corr(), text_auto=".2f", color_continuous_scale='RdBu_r', zmin=-1, zmax=1), use_container_width=True)
+
+        with t5:
+            st.subheader("🛡️ Daily Risk Exposure (95% Confidence)")
+            if 'rolling_var_series' in metrics:
+                r_var = metrics['rolling_var_series']
+                fig_v = go.Figure()
+                fig_v.add_trace(go.Scatter(x=r_var.index, y=r_var.values * 100, fill='tozeroy', 
+                                         name='95% Rolling VaR', line=dict(color='rgba(255, 0, 0, 0.7)')))
+                fig_v.update_layout(yaxis_title="Potential Loss (%)", hovermode="x unified", template="plotly_white")
+                st.plotly_chart(fig_v, use_container_width=True)
+                st.markdown(f"> **指标解读**: 历史 VaR(95%) 为 **{abs(metrics['历史 VaR (95%)']):.2%}**，预期缺口 ES(95%) 为 **{abs(metrics['预期缺口 ES (95%)']):.2%}**。")
 
 else:
-    st.info("Configure the parameters and click 'Run Backtest' to see results.")
+    st.info("Configure and Run Backtest.")
