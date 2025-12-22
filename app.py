@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px  # 【新增】用于绘制归因图表
 import yaml
 import os
 from datetime import datetime
@@ -59,11 +60,17 @@ with st.sidebar:
             )
             factor_weights[factor] = weight
 
-    # 3. Execution Parameters
+    # 【新增】3. Transaction Cost Settings (交互式成本设置)
+    st.divider()
+    st.header("Transaction Costs")
+    comm_rate = st.number_input("Commission Rate", 0.0, 0.01, 0.001, format="%.4f")
+    slip_rate = st.number_input("Slippage Rate", 0.0, 0.01, 0.0005, format="%.4f")
+
+    # 4. Execution Parameters
     rebalance_days = st.slider("Rebalance Frequency (Trading Days)", 1, 60, 20)
     top_n = st.number_input("Top N Selection", 1, 15, 5)
     
-    # 4. Dates
+    # 5. Dates
     col_start, col_end = st.columns(2)
     start_date = col_start.date_input("Start", datetime(2018, 1, 1))
     end_date = col_end.date_input("End", datetime(2024, 7, 31))
@@ -75,21 +82,16 @@ if run_btn:
     if not selected_factors:
         st.error("Error: Please select at least one factor.")
     else:
-        # Pass weights to engine via a custom attribute for this run
-        # Note: In a production system, weights should be passed through the get_factor_snapshot call
-        # For simplicity here, we ensure FactorTopNStrategy holds them.
-        
         bt_config = {
             'INITIAL_CAPITAL': config['backtest'].get('initial_capital', 1000000),
-            'COMMISSION_RATE': config['backtest'].get('commission_rate', 0.001),
-            'SLIPPAGE': config['backtest'].get('slippage', 0.0005),
+            'COMMISSION_RATE': comm_rate, # 【修改】使用侧边栏输入
+            'SLIPPAGE': slip_rate,       # 【修改】使用侧边栏输入
             'REBALANCE_DAYS': rebalance_days
         }
 
         with st.spinner('Running multi-factor simulation...'):
             u_df = dh.load_universe_data(config['paths']['universe_definition'])
             
-            # Initialize Strategy with the weight dictionary
             strategy = FactorTopNStrategy(
                 universe_df=u_df,
                 factor_weights=factor_weights,
@@ -97,8 +99,6 @@ if run_btn:
                 ascending=False
             )
             
-            # IMPORTANT: We need the engine to use the weights during calculation
-            # We modify the engine call slightly to ensure compatibility
             engine = BacktestEngine(
                 start_date=start_date.strftime('%Y-%m-%d'),
                 end_date=end_date.strftime('%Y-%m-%d'),
@@ -107,13 +107,9 @@ if run_btn:
                 data_handler=dh
             )
             
-            # Hack to pass weights to factor engine for the composite score calculation
             engine.factor_engine.current_weights = factor_weights 
-            # Note: Update factor_engine.py to look for self.current_weights in get_factor_snapshot
-            
             equity_df, final_portfolio = engine.run()
             
-            # Performance Analysis
             metrics = calculate_extended_metrics(
                 portfolio_equity=equity_df['total_value'],
                 benchmark_equity=equity_df['total_value'],
@@ -127,7 +123,36 @@ if run_btn:
         m_col3.metric("Sharpe", f"{metrics.get('夏普比率', 0):.2f}")
         m_col4.metric("Max Drawdown", f"{metrics.get('最大回撤', 0):.2%}")
 
-        st.subheader("Performance Chart")
+        # 【新增】交易成本归因看板 (Cost Attribution Summary)
+        st.divider()
+        st.subheader("Transaction Cost Attribution")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Cost", f"¥{metrics.get('总交易成本', 0):,.0f}")
+        c2.metric("Commission", f"¥{metrics.get('累计佣金支出', 0):,.0f}")
+        c3.metric("Slippage", f"¥{metrics.get('累计滑点支出', 0):,.0f}")
+        drag = metrics.get('交易成本对收益损耗', 0)
+        c4.metric("Return Drag", f"-{drag:.2%}", delta_color="inverse")
+
+        # 【新增】归因可视化图表
+        col_pie, col_bar = st.columns(2)
+        with col_pie:
+            cost_df = pd.DataFrame({
+                'Component': ['Commission', 'Slippage'],
+                'Amount': [metrics.get('累计佣金支出', 0), metrics.get('累计滑点支出', 0)]
+            })
+            fig_pie = px.pie(cost_df, values='Amount', names='Component', title="Cost Breakdown", hole=0.4)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with col_bar:
+            comparison_df = pd.DataFrame({
+                'Type': ['Actual Return', 'Theoretical (No Cost)'],
+                'Value': [metrics.get('总回报率', 0) * 100, metrics.get('理论无成本总回报', 0) * 100]
+            })
+            fig_bar = px.bar(comparison_df, x='Type', y='Value', text_auto='.2f', 
+                             title="Actual vs Theoretical Return (%)", color='Type')
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.divider()
+        st.subheader("Equity Curve")
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=equity_df.index, y=equity_df['total_value'], 
