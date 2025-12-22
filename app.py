@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px  # 【新增】用于绘制归因图表
+import plotly.express as px  
 import yaml
 import os
 from datetime import datetime
@@ -60,7 +60,7 @@ with st.sidebar:
             )
             factor_weights[factor] = weight
 
-    # 【新增】3. Transaction Cost Settings (交互式成本设置)
+    # 3. Transaction Cost Settings (交互式成本设置)
     st.divider()
     st.header("Transaction Costs")
     comm_rate = st.number_input("Commission Rate", 0.0, 0.01, 0.001, format="%.4f")
@@ -84,8 +84,8 @@ if run_btn:
     else:
         bt_config = {
             'INITIAL_CAPITAL': config['backtest'].get('initial_capital', 1000000),
-            'COMMISSION_RATE': comm_rate, # 【修改】使用侧边栏输入
-            'SLIPPAGE': slip_rate,       # 【修改】使用侧边栏输入
+            'COMMISSION_RATE': comm_rate, 
+            'SLIPPAGE': slip_rate,       
             'REBALANCE_DAYS': rebalance_days
         }
 
@@ -123,7 +123,7 @@ if run_btn:
         m_col3.metric("Sharpe", f"{metrics.get('夏普比率', 0):.2f}")
         m_col4.metric("Max Drawdown", f"{metrics.get('最大回撤', 0):.2%}")
 
-        # 【新增】交易成本归因看板 (Cost Attribution Summary)
+        # 交易成本归因看板
         st.divider()
         st.subheader("Transaction Cost Attribution")
         c1, c2, c3, c4 = st.columns(4)
@@ -133,7 +133,7 @@ if run_btn:
         drag = metrics.get('交易成本对收益损耗', 0)
         c4.metric("Return Drag", f"-{drag:.2%}", delta_color="inverse")
 
-        # 【新增】归因可视化图表
+        # 归因可视化图表
         col_pie, col_bar = st.columns(2)
         with col_pie:
             cost_df = pd.DataFrame({
@@ -162,11 +162,46 @@ if run_btn:
         fig.update_layout(hovermode="x unified", template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # Data Detail Tabs
-        t1, t2, t3 = st.tabs(["Performance Metrics", "Decision Log", "Holdings"])
+        # 【核心修改】Data Detail Tabs: 增加相关性分析选项卡
+        t1, t2, t3, t4 = st.tabs(["Performance Metrics", "Decision Log", "Holdings", "Factor Correlation"])
+        
         with t1:
             st.table(pd.DataFrame.from_dict(metrics, orient='index', columns=['Value']).astype(str))
         with t2:
             st.dataframe(strategy.get_trade_log(), use_container_width=True)
         with t3:
             st.dataframe(final_portfolio.get_holdings_history(), use_container_width=True)
+        
+        # 【新增】因子相关性热力图逻辑
+        with t4:
+            st.subheader("Factor Cross-Correlation Matrix")
+            factor_series_list = []
+            
+            # 从缓存中提取数据并展平
+            for f_name in selected_factors:
+                if f_name in engine.factor_engine._factor_cache:
+                    f_df = engine.factor_engine._factor_cache[f_name]
+                    # 仅选择回测时间窗口内的数据并 stack 展平为一列
+                    f_stacked = f_df.loc[start_date.strftime('%Y-%m-%d'):end_date.strftime('%Y-%m-%d')].stack()
+                    f_stacked.name = f_name
+                    factor_series_list.append(f_stacked)
+            
+            if len(factor_series_list) > 1:
+                all_factors_df = pd.concat(factor_series_list, axis=1)
+                corr_matrix = all_factors_df.corr()
+                
+                # 绘制交互式热力图
+                fig_corr = px.imshow(
+                    corr_matrix,
+                    text_auto=".2f",
+                    color_continuous_scale='RdBu_r', # 红蓝色调，适合观察正负相关
+                    zmin=-1, zmax=1,
+                    title="Factor Correlation Heatmap"
+                )
+                st.plotly_chart(fig_corr, use_container_width=True)
+                st.info("💡 Tip: Selecting low-correlation factors (<0.3) typically improves portfolio robustness.")
+            else:
+                st.warning("Please select at least two factors to analyze correlation.")
+
+else:
+    st.info("Configure the parameters and click 'Run Backtest' to see results.")
