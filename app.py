@@ -7,13 +7,15 @@ import os
 import io
 from datetime import datetime
 
-# 引入新的查询助手
+# Existing imports
 from llm_quant_lib.data.query_helper import DataQueryHelper
-# 保持原有的导入
 from llm_quant_lib.data_handler import DataHandler
 from llm_quant_lib.strategy import FactorTopNStrategy
 from llm_quant_lib.backtest_engine import BacktestEngine
 from llm_quant_lib.performance import calculate_extended_metrics
+
+# New Analysis Imports
+from llm_quant_lib.analysis.task_runner import FactorTaskRunner
 
 # --- Page Setup ---
 st.set_page_config(page_title="Multi-Factor Backtest App", layout="wide")
@@ -33,8 +35,12 @@ def get_query_helper():
     """New helper for Parquet data visualization"""
     return DataQueryHelper(storage_path='data/processed/all_price_data.parquet')
 
-# --- New Module: Data Explorer ---
-# --- Module: Data Explorer (Minimal Change for Grouping) ---
+@st.cache_resource
+def get_analysis_runner(_dh):
+    """Initialize the factor EDA orchestrator"""
+    return FactorTaskRunner(_dh)
+
+# --- Module: Data Explorer ---
 def render_data_explorer():
     st.header("Data Warehouse Explorer")
     helper = get_query_helper()
@@ -55,24 +61,21 @@ def render_data_explorer():
         st.subheader("Asset Selector")
         all_assets = helper.get_all_symbols()
         
-        # 第一步：选择资产组 (sec group / category_id)
+        # 第一步：选择资产组
         groups = sorted(all_assets['category_id'].unique())
         selected_group = st.selectbox("Select Group", ["All Groups"] + list(groups))
         
-        # 第二步：根据组别过滤标的列表
+        # 第二步：根据组别过滤标的
         if selected_group != "All Groups":
             filtered_list = all_assets[all_assets['category_id'] == selected_group]['sec_code'].unique()
         else:
             filtered_list = all_assets['sec_code'].unique()
             
-        # 第三步：展示过滤后的标的下拉菜单
         selected_symbol = st.selectbox("Select Security", sorted(filtered_list))
 
     with col_r:
         if selected_symbol:
-            # 这里的逻辑保持不变，依然使用 DuckDB 极速调取
             df = helper.get_history(selected_symbol)
-            
             fig = px.line(df, x='datetime', y='close', title=f"{selected_symbol} Historical Price")
             fig.update_layout(template="plotly_white", hovermode="x unified")
             st.plotly_chart(fig, use_container_width=True)
@@ -83,19 +86,73 @@ def render_data_explorer():
             with tab2:
                 st.dataframe(df.sort_values('datetime', ascending=False), use_container_width=True)
 
+# --- New Module: Analysis Explorer ---
+def render_analysis_explorer(dh):
+    st.header("Factor Analysis Explorer")
+    st.info("Perform cross-sectional EDA to evaluate factor predictive power and monotonicity.")
+    
+    runner = get_analysis_runner(dh)
+    
+    # 1. Selection and Config
+    col_a, col_b = st.columns(2)
+    with col_a:
+        # Get factors directly from your Registry
+        factor_list = sorted(list(runner.factor_engine.FACTOR_REGISTRY.keys()))
+        selected_factor = st.selectbox("Select Factor for EDA", factor_list)
+    with col_b:
+        horizon = st.number_input("Forward Return Horizon (Days)", 1, 20, 1)
+
+    if st.button("Run One-Click Analysis", type="primary"):
+        with st.spinner(f"Computing metrics for {selected_factor}..."):
+            # Execute Preprocessing -> IC -> Quantiles
+            stats, ic_series, cum_group_ret = runner.run_analysis_pipeline(selected_factor, horizon=horizon)
+            
+            # Save to state for persistence
+            st.session_state.analysis_ready = True
+            st.session_state.ana_stats = stats
+            st.session_state.ana_ic = ic_series
+            st.session_state.ana_groups = cum_group_ret
+            st.session_state.ana_name = selected_factor
+
+    if st.session_state.get('analysis_ready'):
+        s = st.session_state.ana_stats
+        
+        # 2. Key Stats
+        st.divider()
+        st.subheader(f"Statistical Summary: {st.session_state.ana_name}")
+        st.markdown(f"Metrics calculated using **Rank IC** against **T+{horizon}** returns.")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Mean IC", f"{s['IC Mean']:.4f}")
+        c2.metric("IC Std", f"{s['IC Std']:.4f}")
+        c3.metric("IR (Info Ratio)", f"{s['IR']:.4f}")
+        c4.metric("IC > 0 Rate", f"{s['IC > 0 Rate']:.2%}")
+
+        # 3. IC Time Series
+        st.subheader("IC Time Series")
+        fig_ic = px.area(st.session_state.ana_ic, title="Daily Rank IC", labels={'value': 'IC', 'datetime': 'Date'})
+        fig_ic.update_layout(template="plotly_white")
+        st.plotly_chart(fig_ic, use_container_width=True)
+
+        # 4. Monotonicity / Group Analysis
+        st.subheader("Quantile Analysis (Cumulative Group Returns)")
+        st.write("Assets split into 5 groups daily based on factor value. Group 4 is the highest.")
+        fig_groups = px.line(st.session_state.ana_groups, title="Group Wealth Curves", template="plotly_white")
+        st.plotly_chart(fig_groups, use_container_width=True)
+
 # --- Sidebar: Navigation & Parameters ---
 with st.sidebar:
     st.header("Navigation")
-    # 纯英文切换菜单，不带图标
-    app_mode = st.radio("Choose Module", ["Strategy Explorer", "Data Explorer"])
+    # New Module added to radio
+    app_mode = st.radio("Choose Module", ["Strategy Explorer", "Data Explorer", "Analysis Explorer"])
     
     st.divider()
     
-    # 仅在 Strategy Explorer 模式下显示原有的参数配置
+    # Shared resource across modules
+    dh, config = load_framework('config.yaml')
+    
     if app_mode == "Strategy Explorer":
         st.header("Parameters")
-        dh, config = load_framework('config.yaml')
-        
         bench_options = {
             "S&P 500 (SPXT)": "spxt_index_daily_return.csv",
             "Global Equity (MXWD)": "mxwd_index_daily_return.csv",
@@ -104,7 +161,10 @@ with st.sidebar:
         }
         selected_bench_label = st.selectbox("Compare against Benchmark", list(bench_options.keys()))
         
-        available_factors = ['trend_score', 'momentum', 'volatility', 'turnover_mean', 'alpha001', 'rsi', 'amount_mean']
+        available_factors = sorted(list(dh.price_df.columns)) if hasattr(dh, 'price_df') else []
+        if not available_factors:
+             available_factors = ['trend_score', 'momentum', 'volatility', 'turnover_mean', 'alpha001', 'rsi', 'amount_mean']
+             
         selected_factors = st.multiselect("Select Factors", available_factors, default=['trend_score', 'momentum'])
         
         factor_weights = {}
@@ -129,10 +189,12 @@ with st.sidebar:
 if app_mode == "Data Explorer":
     render_data_explorer()
 
+elif app_mode == "Analysis Explorer":
+    render_analysis_explorer(dh)
+
 elif app_mode == "Strategy Explorer":
     st.title("Quantitative Strategy Explorer")
     
-    # --- Backtest Logic (Your Original Code) ---
     if run_btn:
         if not selected_factors:
             st.error("Error: Please select at least one factor.")
@@ -145,7 +207,7 @@ elif app_mode == "Strategy Explorer":
                 engine.factor_engine.current_weights = factor_weights 
                 equity_df, final_portfolio = engine.run()
 
-                # 基准数据处理
+                # Base Benchmarking
                 bench_file = bench_options[selected_bench_label]
                 bench_path = os.path.join("data", "processed", bench_file)
                 b_raw = pd.read_csv(bench_path)
@@ -156,7 +218,6 @@ elif app_mode == "Strategy Explorer":
 
                 metrics = calculate_extended_metrics(equity_df['total_value'], benchmark_equity, final_portfolio)
                 
-                # 存储至 Session State
                 st.session_state.bt_ready = True
                 st.session_state.equity_df = equity_df
                 st.session_state.metrics = metrics
@@ -166,18 +227,14 @@ elif app_mode == "Strategy Explorer":
                 st.session_state.selected_factors = selected_factors
                 st.session_state.bench_label = selected_bench_label
 
-    # --- Rendering Results (Your Original Code) ---
     if st.session_state.get('bt_ready'):
         m = st.session_state.metrics
-        
-        # 1. Metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Alpha (Excess)", f"{m.get('Alpha', 0):+.2%}")
         c2.metric("Sharpe Ratio", f"{m.get('Sharpe Ratio', 0):.2f}")
         c3.metric("Info Ratio", f"{m.get('Info Ratio', 0):.2f}")
         c4.metric("Beta", f"{m.get('Beta', 0):.2f}")
 
-        # 2. Transaction Cost ($)
         st.divider()
         st.subheader("Transaction Cost Attribution")
         ct1, ct2, ct3, ct4 = st.columns(4)
@@ -186,7 +243,6 @@ elif app_mode == "Strategy Explorer":
         ct3.metric("Slippage", f"${m.get('Slippage', 0):,.0f}")
         ct4.metric("Max Drawdown", f"{m.get('Max Drawdown', 0):.2%}")
 
-        # 3. Excel Report
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             summary_df = pd.DataFrame.from_dict({k: v for k, v in m.items() if not isinstance(v, pd.Series)}, orient='index', columns=['Value'])
@@ -194,22 +250,14 @@ elif app_mode == "Strategy Explorer":
             pd.DataFrame({'Strategy': m['strategy_curve'], 'Benchmark': m['benchmark_curve'], 'Excess': m['excess_curve']}).to_excel(writer, sheet_name='Comparison')
         st.download_button("Download Excel Report", buffer.getvalue(), f"Backtest_Report.xlsx", use_container_width=True)
 
-        # 4. Dual-Axis Chart
         st.subheader(f"Strategy vs {st.session_state.bench_label}")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=m['strategy_curve'].index, y=m['strategy_curve'], name='Strategy', line=dict(color='#0B3D59', width=2.5)))
         fig.add_trace(go.Scatter(x=m['benchmark_curve'].index, y=m['benchmark_curve'], name=st.session_state.bench_label, line=dict(color='#5EA9CE', width=2, dash='dot')))
         fig.add_trace(go.Scatter(x=m['excess_curve'].index, y=m['excess_curve'], name='Excess Return', yaxis='y2', fill='tozeroy', line=dict(color='#8E44AD', width=1.5), fillcolor='rgba(142, 68, 173, 0.2)'))
-        
-        fig.update_layout(
-            hovermode="x unified", template="plotly_white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            yaxis=dict(title=dict(text="Normalized Value", font=dict(color="#0B3D59")), tickfont=dict(color="#0B3D59")),
-            yaxis2=dict(title=dict(text="Cumulative Excess Return", font=dict(color="#8E44AD")), tickfont=dict(color="#8E44AD"), overlaying="y", side="right")
-        )
+        fig.update_layout(hovermode="x unified", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig, use_container_width=True)
 
-        # 5. Persistent Navigation
         st.divider()
         nav_options = ["Performance", "Signals", "Holdings", "Factor Correlation", "Risk Analysis"]
         active_tab = st.radio("Analysis View", nav_options, horizontal=True, key="active_nav_tab")
@@ -243,5 +291,3 @@ elif app_mode == "Strategy Explorer":
                 fig_r.update_layout(yaxis_title="Potential Loss (%)", template="plotly_white")
                 st.plotly_chart(fig_r, use_container_width=True)
                 st.markdown(f"**Metrics**: 95% Historical VaR: **{abs(m.get('VaR_95', 0)):.2%}**, 95% ES: **{abs(m.get('ES_95', 0)):.2%}**.")
-    else:
-        st.info("Configure the parameters and click 'Run Backtest' to see results.")
