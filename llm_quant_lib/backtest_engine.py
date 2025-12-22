@@ -105,9 +105,9 @@ class BacktestEngine:
                 factor_snapshot = self.factor_engine.get_factor_snapshot(
                     decision_date,
                     codes=self.codes_in_universe,
-                    factors=factors_needed
+                    factors=factors_needed,
+                    weights=getattr(self.strategy, 'factor_weights', None) # Pass weights here
                 )
-
                 if factor_snapshot.empty: continue
 
                 # 获取目标权重并执行

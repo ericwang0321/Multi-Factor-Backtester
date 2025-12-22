@@ -217,52 +217,25 @@ class FactorEngine:
             self._factor_cache[factor_name] = pd.DataFrame() 
             return self._factor_cache[factor_name]
 
-    def get_factor_snapshot(self, current_date: pd.Timestamp, codes: List[str], factors: List[str]) -> pd.DataFrame:
-            """
-            Retrieves a cross-sectional snapshot of factors. 
-            If multiple factors are provided, it calculates a normalized composite score.
-            """
-            snapshot_series_list: List[pd.Series] = []
-            
-            # 1. Calculate or retrieve each factor from cache
-            for factor_name in factors:
-                if factor_name not in self._factor_cache:
-                    self._compute_and_cache_factor(factor_name)
-                    
-                factor_df = self._factor_cache[factor_name]
-                
-                if factor_df.empty or current_date not in factor_df.index:
-                    daily_series = pd.Series(index=codes, dtype=float, name=factor_name)
-                else:
-                    daily_series = factor_df.loc[current_date]
-                    daily_series = daily_series[daily_series.index.intersection(codes)]
-                
-                daily_series.name = factor_name
-                snapshot_series_list.append(daily_series)
+    def get_factor_snapshot(self, current_date, codes, factors, weights=None) -> pd.DataFrame:
+            """获取截面快照并计算加权得分"""
+            series_list = []
+            for f in factors:
+                if f not in self._factor_cache: self._compute_and_cache_factor(f)
+                df = self._factor_cache[f]
+                series = df.loc[current_date] if current_date in df.index else pd.Series(index=codes, dtype=float)
+                series.name = f
+                series_list.append(series.reindex(codes))
 
-            if not snapshot_series_list:
-                return pd.DataFrame(index=pd.Index(codes, name='sec_code'))
+            snapshot_df = pd.concat(series_list, axis=1).fillna(0.0)
 
-            # 2. Combine into a single DataFrame
-            snapshot_df = pd.concat(snapshot_series_list, axis=1)
-            snapshot_df.index.name = 'sec_code'
-            snapshot_df = snapshot_df.reindex(codes)
-
-            # 3. Handle Multi-Factor Normalization and Combination
+            # 加权组合逻辑
             if len(factors) > 1:
-                # Calculate Z-score for each factor column: (x - mean) / std
-                # This aligns different factors (e.g., volume vs. returns) to the same scale
-                z_scored_df = snapshot_df[factors].apply(
-                    lambda x: (x - x.mean()) / x.std() if x.std() != 0 else x - x.mean()
-                )
+                # Z-Score 标准化
+                z_df = snapshot_df[factors].apply(lambda x: (x - x.mean()) / x.std() if x.std() != 0 else x - x.mean())
+                if weights is None: weights = {f: 1.0/len(factors) for f in factors}
                 
-                # Fill NaNs with 0 (neutral score) after normalization
-                z_scored_df = z_scored_df.fillna(0.0)
-                
-                # Create the composite score by averaging all normalized factors
-                snapshot_df['composite_score'] = z_scored_df.mean(axis=1)
+                # 计算加权和
+                snapshot_df['composite_score'] = sum(z_df[f] * weights.get(f, 0) for f in factors)
             
-            # 4. Final fill for the output DataFrame
-            snapshot_df_filled = snapshot_df.fillna(0.0)
-
-            return snapshot_df_filled
+            return snapshot_df
