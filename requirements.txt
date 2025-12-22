@@ -21,7 +21,9 @@ deepseek==1.0.0
 defusedxml==0.7.1
 distro==1.9.0
 docopt==0.6.2
+duckdb==1.4.3
 et_xmlfile==2.0.0
+eventkit==1.0.3
 executing==2.2.1
 fastjsonschema==2.21.2
 fonttools==4.60.1
@@ -31,6 +33,7 @@ greenlet==3.2.4
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
+ib-insync==0.9.86
 idna==3.11
 ipython==8.12.3
 jedi==0.19.2
@@ -51,6 +54,7 @@ narwhals==2.14.0
 nbclient==0.10.2
 nbconvert==7.16.6
 nbformat==5.10.4
+nest-asyncio==1.6.0
 numba==0.61.2
 numpy==2.2.6
 openai==2.6.1
