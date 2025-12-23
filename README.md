@@ -20,7 +20,7 @@
 
 ```text
 my_llm_backtester/
-├── llm_quant_lib/           # 核心量化算法库
+├── quant_core/           # 核心量化算法库
 │   ├── data_handler.py      # 数据加载与基准对齐
 │   ├── factor_definitions.py # 【因子定义层】
 │   ├── factor_engine.py     # 【因子计算与注册】
@@ -44,7 +44,7 @@ my_llm_backtester/
 
 ### 1. 定义计算逻辑
 
-在 `llm_quant_lib/factor_definitions.py` 中创建一个继承自 `BaseAlpha` 的类。
+在 `quant_core/factor_definitions.py` 中创建一个继承自 `BaseAlpha` 的类。
 
 ```python
 class FactorRSIDev(BaseAlpha):
@@ -58,7 +58,7 @@ class FactorRSIDev(BaseAlpha):
 
 ### 2. 注册因子
 
-在 `llm_quant_lib/factor_engine.py` 的 `FACTOR_REGISTRY` 字典中添加映射。
+在 `quant_core/factor_engine.py` 的 `FACTOR_REGISTRY` 字典中添加映射。
 
 ```python
 FACTOR_REGISTRY = {

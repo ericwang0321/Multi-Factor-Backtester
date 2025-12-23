@@ -9,11 +9,11 @@ from datetime import datetime
 
 # --- 导入模块 ---
 try:
-    from llm_quant_lib.strategy import FactorTopNStrategy
-    from llm_quant_lib.backtest_engine import BacktestEngine
-    from llm_quant_lib.performance import calculate_extended_metrics, display_metrics
+    from quant_core.strategy import FactorTopNStrategy
+    from quant_core.backtest_engine import BacktestEngine
+    from quant_core.performance import calculate_extended_metrics, display_metrics
     # [修改 1] 引入新的数据查询助手，替代旧的 DataHandler
-    from llm_quant_lib.data.query_helper import DataQueryHelper
+    from quant_core.data.query_helper import DataQueryHelper
 except ImportError as e:
     print(f"导入库出错: {e}")
     sys.exit(1)

@@ -8,14 +8,14 @@ import io
 from datetime import datetime
 
 # 核心库导入
-from llm_quant_lib.data.query_helper import DataQueryHelper
-# from llm_quant_lib.data_handler import DataHandler # ❌ 已删除
-from llm_quant_lib.strategy import FactorTopNStrategy
-from llm_quant_lib.backtest_engine import BacktestEngine
-from llm_quant_lib.performance import calculate_extended_metrics
+from quant_core.data.query_helper import DataQueryHelper
+# from quant_core.data_handler import DataHandler # ❌ 已删除
+from quant_core.strategy import FactorTopNStrategy
+from quant_core.backtest_engine import BacktestEngine
+from quant_core.performance import calculate_extended_metrics
 
 # EDA 分析模块导入
-from llm_quant_lib.analysis.task_runner import FactorTaskRunner
+from quant_core.analysis.task_runner import FactorTaskRunner
 
 # --- Page Setup ---
 st.set_page_config(page_title="Multi-Factor Backtest App", layout="wide")

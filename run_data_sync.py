@@ -1,6 +1,6 @@
 # run_data_sync.py
 from ib_insync import IB
-from llm_quant_lib.data.data_manager import DataManager
+from quant_core.data.data_manager import DataManager
 
 ib = IB()
 try:
