@@ -1,25 +1,26 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
 import yaml
-import os
 import io
 from datetime import datetime
 import sys
 import subprocess
 import time
 
-# --- 核心库导入 (适配新架构) ---
+# --- 核心库导入 ---
 from quant_core.data.query_helper import DataQueryHelper
-# [修改] 导入新的策略类
 from quant_core.strategies.rules import LinearWeightedStrategy
 from quant_core.backtest_engine import BacktestEngine
 from quant_core.performance import calculate_extended_metrics
-from quant_core.factors.engine import FactorEngine  # 需要用它来准备数据
-
-# EDA 分析模块导入
+from quant_core.factors.engine import FactorEngine
 from quant_core.analysis.task_runner import FactorTaskRunner
+
+# --- 引入可视化模块 ---
+from quant_core.visualization.market import MarketCharts
+from quant_core.visualization.factor import FactorCharts
+from quant_core.visualization.performance import PerformanceCharts
+from quant_core.visualization.trading import TradingCharts     # 交易视图
+from quant_core.visualization.reporting import ReportGenerator # 报告生成器
 
 # --- Page Setup ---
 st.set_page_config(page_title="Multi-Factor Backtest App", layout="wide")
@@ -33,65 +34,38 @@ def load_config(config_path):
 
 @st.cache_resource
 def get_query_helper():
-    """Single source of truth for Data"""
-    # 确保路径指向您的 Parquet 文件
     return DataQueryHelper(storage_path='data/processed/all_price_data.parquet')
 
 @st.cache_resource
 def get_factor_engine(_query_helper):
-    """
-    获取因子引擎实例 (用于在 App 中临时计算因子)
-    """
     return FactorEngine(query_helper=_query_helper)
 
 @st.cache_resource
 def get_analysis_runner(_query_helper):
     return FactorTaskRunner(_query_helper)
 
-# [新增] 专门为新策略准备数据的函数
 def prepare_factor_data_for_strategy(_engine, codes, factors, start_date, end_date):
-    """
-    在内存中计算选定因子的历史数据，并转换为 Strategy 需要的 MultiIndex DataFrame。
-    """
-    # 确保数据已初始化
+    """内存计算因子数据"""
     if _engine.xarray_data is None:
         _engine._get_xarray_data()
-        
     data_dict = {}
-    
-    # 进度条
     progress_text = "Computing factors in-memory..."
     my_bar = st.progress(0, text=progress_text)
-    
     total = len(factors)
     for i, f_name in enumerate(factors):
-        # 调用 FactorEngine 计算全量历史
         df = _engine._compute_and_cache_factor(f_name)
-        
         if not df.empty:
-            # 截取时间段 (为了性能，虽然 Engine 算的是全量)
-            # 转为 stack 格式: index=[datetime, sec_code], value=factor_value
             df_slice = df.loc[str(start_date):str(end_date)]
-            # 过滤 Universe
             valid_cols = [c for c in df_slice.columns if c in codes]
             if valid_cols:
                 stacked = df_slice[valid_cols].stack()
                 stacked.name = f_name
                 data_dict[f_name] = stacked
-        
         my_bar.progress((i + 1) / total, text=f"Computed {f_name}")
-    
     my_bar.empty()
-    
-    if not data_dict:
-        return pd.DataFrame()
-        
-    # 合并为大宽表 (Index: datetime, sec_code; Columns: factor1, factor2...)
+    if not data_dict: return pd.DataFrame()
     full_factor_df = pd.concat(data_dict.values(), axis=1)
-    
-    # 确保索引名为 datetime, sec_code 以匹配 BaseStrategy 的逻辑
     full_factor_df.index.names = ['datetime', 'sec_code']
-    
     return full_factor_df
 
 # --- Module 1: Data Explorer ---
@@ -111,26 +85,24 @@ def render_data_explorer():
     with col_l:
         st.subheader("Asset Selector")
         all_assets = helper.get_all_symbols()
-        
         groups = sorted(all_assets['category_id'].unique())
         selected_group = st.selectbox("Select Group", ["All Groups"] + list(groups))
-        
         if selected_group != "All Groups":
             filtered_list = all_assets[all_assets['category_id'] == selected_group]['sec_code'].unique()
         else:
             filtered_list = all_assets['sec_code'].unique()
-            
         selected_symbol = st.selectbox("Select Security", sorted(filtered_list))
 
     with col_r:
         if selected_symbol:
             df = helper.get_history(selected_symbol)
-            fig = px.line(df, x='datetime', y='close', title=f"{selected_symbol} Historical Price")
-            fig.update_layout(template="plotly_white", hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(MarketCharts.plot_price_history(df, selected_symbol), use_container_width=True)
+            
             t1, t2 = st.tabs(["Volume Analysis", "Data Table"])
-            with t1: st.plotly_chart(px.bar(df, x='datetime', y='volume'), use_container_width=True)
-            with t2: st.dataframe(df.sort_values('datetime', ascending=False), use_container_width=True)
+            with t1: 
+                st.plotly_chart(MarketCharts.plot_volume(df), use_container_width=True)
+            with t2: 
+                st.dataframe(df.sort_values('datetime', ascending=False), use_container_width=True)
 
 # --- Module 2: Analysis Explorer ---
 def render_analysis_explorer(helper):
@@ -166,10 +138,10 @@ def render_analysis_explorer(helper):
             c4.metric("IC > 0 Rate", f"{s['IC > 0 Rate']:.2%}")
             
             st.subheader("Daily Rank IC")
-            st.line_chart(st.session_state.ana_ic)
+            st.plotly_chart(FactorCharts.plot_ic_series(st.session_state.ana_ic), use_container_width=True)
             
             st.subheader("Quantile Analysis (Fixed Wealth Curves)")
-            st.plotly_chart(px.line(st.session_state.ana_groups, template="plotly_white"), use_container_width=True)
+            st.plotly_chart(FactorCharts.plot_quantile_layers(st.session_state.ana_groups), use_container_width=True)
         else:
             st.warning("No valid statistics generated. Check data quality.")
 
@@ -183,46 +155,24 @@ with st.sidebar:
     
     if app_mode == "Strategy Explorer":
         st.header("Parameters")
-        bench_options = {
-            "S&P 500 (SPY)": "SPY", 
-            "Global Equity (ACWI)": "ACWI", 
-            "Global Bond (AGG)": "AGG", 
-            "Commodities (GSG)": "GSG"
-        }
+        bench_options = {"S&P 500 (SPY)": "SPY", "Global Equity (ACWI)": "ACWI", "Global Bond (AGG)": "AGG", "Commodities (GSG)": "GSG"}
         selected_bench_label = st.selectbox("Compare against Benchmark", list(bench_options.keys()))
         
-        # 获取因子列表
         runner_temp = get_analysis_runner(helper)
         available_factors = sorted(list(runner_temp.factor_engine.FACTOR_REGISTRY.keys()))
-        
         selected_factors = st.multiselect("Select Factors", available_factors, default=['momentum', 'rsi'])
-        
         factor_weights = {f: st.number_input(f"Weight: {f}", 0.0, 1.0, 1.0/len(selected_factors), 0.05) for f in selected_factors} if selected_factors else {}
         
-        # --- [新增] 风控模块 ---
         st.divider()
         st.header("🛡️ Risk Management")
+        enable_stop_loss = st.checkbox("Enable Stop Loss", value=False)
+        stop_loss_pct = (st.slider("Stop Loss %", 1, 30, 10) / 100.0) if enable_stop_loss else None
         
-        # 1. 止损设置 (Stop Loss)
-        enable_stop_loss = st.checkbox("Enable Stop Loss", value=False, help="Sell stock if loss exceeds this %")
-        stop_loss_pct = None
-        if enable_stop_loss:
-            stop_loss_input = st.slider("Stop Loss % (Per Trade)", 1, 30, 10)
-            stop_loss_pct = stop_loss_input / 100.0
-            
-        # 2. 单票限仓 (Position Limit)
-        enable_pos_limit = st.checkbox("Enable Position Limit", value=True, help="Max weight for a single stock")
-        max_pos_weight = None
-        if enable_pos_limit:
-            max_pos_input = st.slider("Max Weight % (Per Stock)", 10, 100, 30)
-            max_pos_weight = max_pos_input / 100.0
-            
-        # 3. 熔断设置 (Circuit Breaker)
-        enable_circuit_breaker = st.checkbox("Enable Circuit Breaker", value=False, help="Close all positions if portfolio drawdown exceeds this %")
-        max_drawdown_pct = None
-        if enable_circuit_breaker:
-            dd_input = st.slider("Max Drawdown % (Portfolio)", 5, 50, 20)
-            max_drawdown_pct = dd_input / 100.0
+        enable_pos_limit = st.checkbox("Enable Position Limit", value=True)
+        max_pos_weight = (st.slider("Max Weight %", 10, 100, 30) / 100.0) if enable_pos_limit else None
+        
+        enable_circuit_breaker = st.checkbox("Enable Circuit Breaker", value=False)
+        max_drawdown_pct = (st.slider("Max Drawdown %", 5, 50, 20) / 100.0) if enable_circuit_breaker else None
         
         st.divider()
         st.header("Costs & Execution")
@@ -236,35 +186,11 @@ with st.sidebar:
         run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
         
     st.markdown("---")
-    with st.expander("📡 Data Status", expanded=False):
-        try:
-            h_temp = get_query_helper()
-            mkt_summary = h_temp.get_market_summary()
-            if not mkt_summary.empty:
-                latest_date = mkt_summary['end'].max()
-                st.caption(f"Data up to: **{latest_date.strftime('%Y-%m-%d')}**")
-            else:
-                st.caption("Data: Empty")
-        except Exception:
-            st.caption("Status: Unknown")
-
+    with st.expander("📡 Data Status"):
         if st.button("🔄 Sync Now", use_container_width=True):
-            status_box = st.empty()
-            status_box.info("⏳ Connecting to IBKR...")
-            try:
-                result = subprocess.run([sys.executable, "run_data_sync.py"], capture_output=True, text=True)
-                if result.returncode == 0:
-                    status_box.success("✅ Complete!")
-                    st.cache_resource.clear()
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    status_box.error("❌ Failed")
-                    with st.expander("Log"): st.code(result.stderr)
-            except Exception as e:
-                status_box.error(f"Err: {str(e)}")
-
-# --- Sidebar End ---
+            subprocess.run([sys.executable, "run_data_sync.py"])
+            st.cache_resource.clear()
+            st.rerun()
 
 if app_mode == "Data Explorer": 
     render_data_explorer()
@@ -278,79 +204,43 @@ elif app_mode == "Strategy Explorer":
             st.error("Error: Please select at least one factor.")
         else:
             try:
-                # --- A. 准备配置 ---
-                bt_config = {
-                    'INITIAL_CAPITAL': 1000000, 
-                    'COMMISSION_RATE': comm_rate, 
-                    'SLIPPAGE': slip_rate, 
-                    'REBALANCE_DAYS': rebalance_days
-                }
-                
-                # --- B. 数据准备 ---
+                bt_config = {'INITIAL_CAPITAL': 1000000, 'COMMISSION_RATE': comm_rate, 'SLIPPAGE': slip_rate, 'REBALANCE_DAYS': rebalance_days}
                 u_df = helper.get_all_symbols()
                 universe_codes = u_df['sec_code'].tolist()
                 
-                # [核心步骤] 准备因子数据 (内存计算)
                 f_engine = get_factor_engine(helper)
-                factor_data = prepare_factor_data_for_strategy(
-                    f_engine, universe_codes, selected_factors, start_date, end_date
-                )
+                factor_data = prepare_factor_data_for_strategy(f_engine, universe_codes, selected_factors, start_date, end_date)
                 
                 if factor_data.empty:
-                    st.error("No factor data generated. Please check data source.")
+                    st.error("No factor data generated.")
                 else:
-                    # --- C. 初始化新策略 (带风控参数) ---
-                    strategy = LinearWeightedStrategy(
-                        name="App_Linear_Strategy", 
-                        weights=factor_weights, 
-                        top_k=top_k,
-                        # [新增] 注入前端设置的风控参数
-                        stop_loss_pct=stop_loss_pct,
-                        max_pos_weight=max_pos_weight,
-                        max_drawdown_pct=max_drawdown_pct
-                    )
-                    
-                    # [关键] 注入因子数据
+                    strategy = LinearWeightedStrategy(name="App_Strat", weights=factor_weights, top_k=top_k, 
+                                                      stop_loss_pct=stop_loss_pct, max_pos_weight=max_pos_weight, max_drawdown_pct=max_drawdown_pct)
                     strategy.load_data(factor_data)
                     
-                    # --- D. 初始化引擎 ---
-                    engine = BacktestEngine(
-                        start_date=start_date.strftime('%Y-%m-%d'), 
-                        end_date=end_date.strftime('%Y-%m-%d'), 
-                        config=bt_config, 
-                        strategy=strategy, 
-                        query_helper=helper
-                    )
+                    engine = BacktestEngine(start_date=start_date.strftime('%Y-%m-%d'), end_date=end_date.strftime('%Y-%m-%d'), 
+                                            config=bt_config, strategy=strategy, query_helper=helper)
                     
-                    # --- E. 运行 ---
                     with st.spinner('Running simulation...'):
                         equity_df, final_portfolio = engine.run()
 
-                    # --- F. 基准与指标 ---
                     bench_symbol = bench_options[selected_bench_label]
                     b_rets = helper.get_benchmark_returns(bench_symbol)
-                    
                     if not b_rets.empty:
-                        s_ts = pd.Timestamp(start_date)
-                        e_ts = pd.Timestamp(end_date)
-                        b_rets = b_rets.loc[s_ts:e_ts]
+                        b_rets = b_rets.loc[pd.Timestamp(start_date):pd.Timestamp(end_date)]
                         benchmark_equity = (1 + b_rets).cumprod() * bt_config['INITIAL_CAPITAL']
-                        # 对齐数据
                         benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill').fillna(bt_config['INITIAL_CAPITAL'])
                     else:
-                        st.warning(f"Benchmark data missing for {bench_symbol}")
                         benchmark_equity = pd.Series(bt_config['INITIAL_CAPITAL'], index=equity_df.index)
                         
                     metrics = calculate_extended_metrics(equity_df['total_value'], benchmark_equity, final_portfolio)
                     
-                    # 存入 Session State
                     st.session_state.bt_ready = True
-                    st.session_state.equity_df = equity_df
                     st.session_state.metrics = metrics
+                    st.session_state.equity_df = equity_df
                     st.session_state.strategy = strategy
                     st.session_state.final_portfolio = final_portfolio
                     st.session_state.engine = engine
-                    st.session_state.selected_factors = selected_factors
                     st.session_state.bench_label = selected_bench_label
             
             except Exception as e:
@@ -358,18 +248,14 @@ elif app_mode == "Strategy Explorer":
                 import traceback
                 st.code(traceback.format_exc())
 
-    # --- 结果展示 (完全恢复) ---
     if st.session_state.get('bt_ready'):
         m = st.session_state.metrics
-        
-        # 1. 关键指标卡片
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Alpha (Excess)", f"{m.get('Alpha', 0):+.2%}")
-        c2.metric("Sharpe Ratio", f"{m.get('Sharpe Ratio', 0):.2f}")
+        c1.metric("Alpha", f"{m.get('Alpha', 0):+.2%}")
+        c2.metric("Sharpe", f"{m.get('Sharpe Ratio', 0):.2f}")
         c3.metric("Info Ratio", f"{m.get('Info Ratio', 0):.2f}")
         c4.metric("Beta", f"{m.get('Beta', 0):.2f}")
 
-        # 2. 成本与回撤
         st.divider()
         st.subheader("Transaction Cost Attribution")
         ct1, ct2, ct3, ct4 = st.columns(4)
@@ -378,80 +264,90 @@ elif app_mode == "Strategy Explorer":
         ct3.metric("Slippage", f"${m.get('Slippage', 0):,.0f}")
         ct4.metric("Max Drawdown", f"{m.get('Max Drawdown', 0):.2%}")
 
-        # 3. Excel 下载
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            summary_df = pd.DataFrame.from_dict({k: v for k, v in m.items() if not isinstance(v, pd.Series)}, orient='index', columns=['Value'])
-            summary_df.to_excel(writer, sheet_name='Summary')
-            ts_df = pd.DataFrame({'Strategy': m['strategy_curve'], 'Benchmark': m['benchmark_curve'], 'Excess': m['excess_curve']})
-            ts_df.to_excel(writer, sheet_name='Comparison')
-        st.download_button("Download Excel Report", buffer.getvalue(), f"Backtest_Report.xlsx", use_container_width=True)
-
-        # 4. 净值曲线图 (Plotly)
-        st.subheader(f"Strategy vs {st.session_state.bench_label}")
-        fig = go.Figure()
-        # 策略曲线
-        fig.add_trace(go.Scatter(x=m['strategy_curve'].index, y=m['strategy_curve'], name='Strategy', line=dict(color='#0B3D59', width=2.5)))
-        # 基准曲线
-        fig.add_trace(go.Scatter(x=m['benchmark_curve'].index, y=m['benchmark_curve'], name=st.session_state.bench_label, line=dict(color='#5EA9CE', width=2, dash='dot')))
-        # 超额收益 (阴影区)
-        fig.add_trace(go.Scatter(x=m['excess_curve'].index, y=m['excess_curve'], name='Excess Return', yaxis='y2', fill='tozeroy', line=dict(color='#8E44AD', width=1.5), fillcolor='rgba(142, 68, 173, 0.2)'))
-        
-        fig.update_layout(
-            hovermode="x unified", template="plotly_white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            yaxis=dict(title=dict(text="Normalized Value", font=dict(color="#0B3D59")), tickfont=dict(color="#0B3D59")),
-            yaxis2=dict(title=dict(text="Cumulative Excess Return", font=dict(color="#8E44AD")), tickfont=dict(color="#8E44AD"), overlaying="y", side="right")
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # 5. 详细分析 Tab
+        # --- 报告生成模块 ---
         st.divider()
-        nav_options = ["Performance", "Signals", "Holdings", "Factor Correlation", "Risk Analysis"]
-        active_tab = st.radio("Analysis View", nav_options, horizontal=True, key="active_nav_tab")
+        st.subheader("📊 Report & Export")
+        
+        reporter = ReportGenerator(strategy_name="Linear_Weighted_Strategy")
+        
+        col_down1, col_down2 = st.columns(2)
+        
+        trade_log = st.session_state.final_portfolio.get_trade_log()
+        holdings = st.session_state.final_portfolio.get_holdings_history()
+        
+        excel_data = reporter.generate_excel_report(m, st.session_state.equity_df, holdings, trade_log)
+        col_down1.download_button("📥 Download Excel Report", excel_data, f"Backtest_{datetime.now().strftime('%Y%m%d')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        
+        # [核心修正] HTML 报告
+        # 直接从 metrics (m) 中获取 'drawdown_series'，这是由 performance.py 统一计算的
+        html_report = reporter.generate_html_report(
+            metrics=m,
+            equity_curve=m['strategy_curve'],
+            benchmark_curve=m['benchmark_curve'],
+            drawdown_series=m.get('drawdown_series'), # <--- 使用 performance.py 返回的标准数据
+            trade_log=trade_log
+        )
+        col_down2.download_button("🌏 Download HTML Report", html_report, f"Report_{datetime.now().strftime('%Y%m%d')}.html", "text/html", use_container_width=True)
+        
+        st.divider()
+        st.subheader(f"Strategy vs {st.session_state.bench_label}")
+        st.plotly_chart(PerformanceCharts.plot_equity_curve(m['strategy_curve'], m['benchmark_curve'], st.session_state.bench_label), use_container_width=True)
+
+        st.divider()
+        active_tab = st.radio("Analysis View", ["Performance", "Signals", "Trade Inspection", "Holdings", "Factor Correlation", "Risk Analysis"], horizontal=True)
 
         if active_tab == "Performance":
             st.table(pd.DataFrame.from_dict({k: v for k, v in m.items() if not isinstance(v, pd.Series)}, orient='index', columns=['Value']).astype(str))
         
         elif active_tab == "Signals":
-            # 注意：如果 BaseStrategy 里没写日志记录，这里可能是空的。
-            # 通常我们在 Engine 里记录 trade_log，这里尝试获取
-            st.info("Trade signals log (from Engine):")
-            st.dataframe(st.session_state.strategy.get_trade_log() if hasattr(st.session_state.strategy, 'get_trade_log') else pd.DataFrame(), use_container_width=True)
+            # [核心修正] 直接显示 trade_log
+            if not trade_log.empty:
+                st.dataframe(trade_log, use_container_width=True)
+            else:
+                st.info("No trades executed.")
             
+        elif active_tab == "Trade Inspection":
+            st.subheader("🔍 Individual Trade Inspection")
+            # [核心修正] 修复 AttributeError (MultIndex 处理)
+            if hasattr(st.session_state.strategy, 'factor_data') and st.session_state.strategy.factor_data is not None:
+                # 使用 index.get_level_values 获取股票代码列表
+                available_assets = st.session_state.strategy.factor_data.index.get_level_values('sec_code').unique()
+                inspected_symbol = st.selectbox("Select Asset to Inspect", sorted(available_assets))
+                
+                if inspected_symbol:
+                    insp_price = helper.get_history(inspected_symbol).loc[str(start_date):str(end_date)]
+                    
+                    if not trade_log.empty and 'sec_code' in trade_log.columns:
+                         insp_signals = trade_log[trade_log['sec_code'] == inspected_symbol]
+                    else:
+                         insp_signals = pd.DataFrame()
+                    
+                    if not insp_price.empty:
+                        fig_trade = TradingCharts.plot_strategy_view(
+                            df_price=insp_price,
+                            df_signals=insp_signals
+                        )
+                        st.plotly_chart(fig_trade, use_container_width=True)
+                    else:
+                        st.warning("No price data for this symbol.")
+            else:
+                st.info("Run backtest to inspect trades.")
+
         elif active_tab == "Holdings":
-            st.dataframe(st.session_state.final_portfolio.get_holdings_history(), use_container_width=True)
-            
+            st.dataframe(holdings, use_container_width=True)
         elif active_tab == "Factor Correlation":
-            st.subheader("Dynamic Factor Correlation Analysis")
-            # 从 strategy 对象里直接取刚才算好的 factor_data
+            st.subheader("Dynamic Factor Correlation")
             if hasattr(st.session_state.strategy, 'factor_data') and st.session_state.strategy.factor_data is not None:
                 fd = st.session_state.strategy.factor_data
-                
-                # 时间滑块
-                a_range = st.slider("Select Analysis Period", min_value=start_date, max_value=end_date, value=(start_date, end_date), format="YYYY-MM-DD", key="corr_slider")
-                
-                # 切片 (index level 0 is datetime)
+                a_range = st.slider("Period", min_value=start_date, max_value=end_date, value=(start_date, end_date), format="YYYY-MM-DD")
                 try:
                     fd_slice = fd.loc[str(a_range[0]):str(a_range[1])]
                     if not fd_slice.empty:
-                        # factor_data 已经是宽表了 (columns=factor names)，直接 corr()
                         corr_m = fd_slice.corr()
-                        st.plotly_chart(px.imshow(corr_m, text_auto=".2f", color_continuous_scale='RdBu_r', zmin=-1, zmax=1), use_container_width=True)
-                    else:
-                        st.warning("No data in selected range.")
-                except Exception as e:
-                    st.error(f"Error filtering data: {e}")
-            else:
-                st.info("No factor data available.")
-                
+                        st.plotly_chart(FactorCharts.plot_correlation_matrix(corr_m), use_container_width=True)
+                except Exception: st.warning("No data")
         elif active_tab == "Risk Analysis":
-            st.subheader("Daily Risk Exposure (95% Confidence)")
+            st.subheader("Risk Analysis")
             if 'rolling_var_series' in m:
-                fig_r = go.Figure()
-                fig_r.add_trace(go.Scatter(x=m['rolling_var_series'].index, y=m['rolling_var_series'].values * 100, fill='tozeroy', name='95% Rolling VaR', line=dict(color='rgba(255, 0, 0, 0.6)')))
-                fig_r.update_layout(yaxis_title="Potential Loss (%)", template="plotly_white")
-                st.plotly_chart(fig_r, use_container_width=True)
+                st.plotly_chart(PerformanceCharts.plot_rolling_var(m['rolling_var_series']), use_container_width=True)
                 st.markdown(f"**Metrics**: 95% Historical VaR: **{abs(m.get('VaR_95', 0)):.2%}**, 95% ES: **{abs(m.get('ES_95', 0)):.2%}**.")
-    else:
-        st.info("👈 Configure parameters on the left and click 'Run Backtest' to start.")

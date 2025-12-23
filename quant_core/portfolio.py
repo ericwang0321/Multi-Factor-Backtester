@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 class Portfolio:
     """
     负责管理投资组合的状态、现金和执行交易。
-    已增强：支持交易成本追踪 + 【新增】持仓成本(Avg Cost)计算。
+    已增强：支持交易成本追踪 + 持仓成本(Avg Cost)计算 + 【新增】交易日志记录
     """
     def __init__(self, open_prices: pd.DataFrame, close_prices: pd.DataFrame, initial_capital: float, commission_rate: float, slippage: float):
         if not isinstance(open_prices.index, pd.DatetimeIndex) or not isinstance(close_prices.index, pd.DatetimeIndex):
@@ -19,13 +19,12 @@ class Portfolio:
         self.initial_capital = initial_capital
         self.commission_rate = commission_rate
         self.slippage = slippage
-        self.config = None 
 
         self.cash = initial_capital
         # {sec_code: shares} 持有股数
         self.current_positions: Dict[str, float] = defaultdict(float)
         
-        # --- 【新增】追踪平均持仓成本 {sec_code: avg_cost_per_share} ---
+        # 追踪平均持仓成本 {sec_code: avg_cost_per_share}
         self.avg_costs: Dict[str, float] = defaultdict(float)
         
         # 记录每日总净值
@@ -34,6 +33,9 @@ class Portfolio:
         self.holdings_history: List[Dict] = [] 
         # 记录换手率
         self.turnover_history: List[float] = [] 
+
+        # --- 【核心新增 1】交易记录列表 ---
+        self.trade_records: List[Dict] = []
 
         # 归因分析变量
         self.total_commission_paid = 0.0  
@@ -49,7 +51,6 @@ class Portfolio:
         if date in self.close_prices.index:
             prices_today = self.close_prices.loc[date]
             for sec, shares in self.current_positions.items():
-                # 兼容处理: 确保价格存在且有效
                 if sec in prices_today.index:
                     p = prices_today[sec]
                     if pd.notna(p) and p > 0:
@@ -58,7 +59,6 @@ class Portfolio:
 
     def update_portfolio_value(self, date: pd.Timestamp):
         """记录当天的投资组合总价值到历史记录"""
-        # 防止同一天重复记录
         if self.portfolio_history and self.portfolio_history[-1]['datetime'] == date:
             self.portfolio_history.pop()
 
@@ -67,9 +67,7 @@ class Portfolio:
         return total_value
 
     def get_portfolio_state(self):
-        """
-        【新增】获取当前账户快照，供策略层风控使用
-        """
+        """获取当前账户快照，供策略层风控使用"""
         return {
             'total_equity': self.portfolio_history[-1]['total_value'] if self.portfolio_history else self.initial_capital,
             'cash': self.cash,
@@ -123,7 +121,6 @@ class Portfolio:
         for sec, shares_to_sell in sell_trades.items():
             # 目标持仓量 = 当前 + 变动(负数)
             target_shares_after_sell = self.current_positions[sec] + shares_to_sell
-            # 防止精度问题导致负持仓
             if target_shares_after_sell < 0: target_shares_after_sell = 0
             
             sell_nominal, _ = self._execute_trade(trade_date, sec, target_shares_after_sell)
@@ -145,7 +142,8 @@ class Portfolio:
     def _execute_trade(self, date: pd.Timestamp, sec_code: str, target_shares: float) -> Tuple[float, Optional[str]]:
         """
         执行单笔交易并记录佣金与滑点。
-        【新增逻辑】更新平均持仓成本 (Avg Cost)。
+        更新平均持仓成本 (Avg Cost)。
+        【新增】记录交易日志到 self.trade_records。
         """
         price = self.open_prices.loc[date, sec_code] if date in self.open_prices.index and sec_code in self.open_prices.columns else np.nan
 
@@ -164,6 +162,8 @@ class Portfolio:
         comm_cost = trade_nominal_value * self.commission_rate
         slip_cost = trade_nominal_value * self.slippage
 
+        actual_shares_traded = 0.0 # 实际成交股数
+
         if trade_type == 'buy':
             # 买入：实际支出
             total_required = trade_nominal_value + comm_cost + slip_cost
@@ -179,10 +179,8 @@ class Portfolio:
             if actual_buy_shares * price < 1.0: # 金额太小不交易
                 return 0.0, None
 
-            # --- 【核心修改】计算加权平均成本 ---
-            # 新成本 = (旧持仓*旧成本 + 新买入*买入价(含费)) / 总持仓
+            # 计算加权平均成本
             old_cost_basis = current_shares * self.avg_costs[sec_code]
-            # 买入成本通常包含交易费用
             new_cost_basis = trade_nominal_value + comm_cost + slip_cost 
             new_total_shares = current_shares + actual_buy_shares
             
@@ -196,6 +194,8 @@ class Portfolio:
             # 记录归因
             self.total_commission_paid += trade_nominal_value * self.commission_rate
             self.total_slippage_paid += trade_nominal_value * self.slippage
+            
+            actual_shares_traded = actual_buy_shares
 
         elif trade_type == 'sell':
             # 卖出
@@ -210,11 +210,26 @@ class Portfolio:
             self.total_commission_paid += real_nominal * self.commission_rate
             self.total_slippage_paid += real_nominal * self.slippage
             trade_nominal_value = real_nominal
+            
+            actual_shares_traded = actual_shares_to_sell
 
-            # --- 【核心修改】卖出不影响单位成本，只在清仓时移除 ---
+            # 卖出不影响单位成本，只在清仓时移除
             if self.current_positions[sec_code] < 1e-6:
                 del self.current_positions[sec_code]
                 del self.avg_costs[sec_code] # 清仓，移除成本记录
+
+        # --- 【核心新增 2】记录交易日志 ---
+        if actual_shares_traded > 0:
+            self.trade_records.append({
+                'datetime': date,
+                'sec_code': sec_code,
+                'action': trade_type,
+                'price': price,
+                'shares': actual_shares_traded,
+                'value': trade_nominal_value,
+                'commission': trade_nominal_value * self.commission_rate,
+                'slippage': trade_nominal_value * self.slippage
+            })
 
         return trade_nominal_value, trade_type
 
@@ -241,10 +256,16 @@ class Portfolio:
                         'datetime': date, 'sec_code': sec, 'shares': shares,
                         'price': price, 'value': holding_value, 'weight': weight
                     })
-    
-    # 保持原有接口兼容性
-    get_holdings_history = lambda self: pd.DataFrame(self.holdings_history)
-    
+
+    # --- 【核心新增 3】获取交易日志接口 ---
+    def get_trade_log(self) -> pd.DataFrame:
+        if not self.trade_records:
+            return pd.DataFrame(columns=['datetime', 'sec_code', 'action', 'price', 'shares', 'value', 'commission', 'slippage'])
+        return pd.DataFrame(self.trade_records)
+
+    def get_holdings_history(self) -> pd.DataFrame:
+        return pd.DataFrame(self.holdings_history)
+
     def get_portfolio_history(self) -> pd.DataFrame:
         if not self.portfolio_history:
             return pd.DataFrame(columns=['datetime', 'total_value'])
