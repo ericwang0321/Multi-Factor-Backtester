@@ -1,6 +1,5 @@
 # 路径配置
 paths:
-  # [修改] 指向 Parquet 数据文件 (代码中其实硬编码了，但放这里备查是个好习惯)
   parquet_data: "data/processed/all_price_data.parquet"
   plot_dir_base: "plots"
   log_dir_base: "logs"
@@ -12,24 +11,23 @@ backtest:
   initial_capital: 1000000
   commission_rate: 0.001
   slippage: 0.0005
-  rebalance_days: 20        # 按每 20 个交易日调仓
-  rebalance_months: 1       # (备用) 若 rebalance_days 为 null 则按月调仓
+  rebalance_days: 20
+  rebalance_months: 1
 
-# 策略配置 (适配 LinearWeightedStrategy)
+# 策略配置
 strategy:
   factor_strategy:
-    universe_to_trade: "All"  # 资产池选择: 'All', 'SP500', 'ETF' 等 (需 DataQueryHelper 支持)
+    universe_to_trade: "All"
     
-    # [核心修改] 使用权重字典，支持多因子
-    # 正数表示正相关(越大越好)，负数表示负相关(越小越好)
+    # 因子权重
     weights:
-      momentum: 1.0           # 动量因子
-      rsi: -0.5               # RSI (通常视为反转指标，过高要卖，所以给负权重)
-      # trend_score: 1.0      # 你可以随时解注添加更多因子
+      momentum: 1.0
+      rsi: -0.5
     
-    top_n: 5                  # 持仓数量
-
-# 废弃参数说明 (已删除):
-# - price_data_csv: 已被 Parquet 替代
-# - factor_name: 已被 weights 替代
-# - ascending: 已被 weights 的正负号替代
+    top_n: 5
+    
+    # --- 【新增】风控参数配置 ---
+    risk_management:
+      stop_loss_pct: 0.10      # 止损: 单笔亏损 10% 卖出 (设为 null 则关闭)
+      max_pos_weight: 0.30     # 限仓: 单票最大 30% 仓位 (设为 null 则关闭)
+      max_drawdown_pct: 0.20   # 熔断: 账户回撤 20% 清仓 (设为 null 则关闭)

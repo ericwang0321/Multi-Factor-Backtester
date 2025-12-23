@@ -8,9 +8,7 @@ from datetime import datetime
 
 # --- 导入模块 ---
 try:
-    # [修改 1] 不需要导入 FactorEngine 了，因为我们直接读文件
     from quant_core.strategies.rules import LinearWeightedStrategy
-    
     from quant_core.backtest_engine import BacktestEngine
     from quant_core.performance import calculate_extended_metrics, display_metrics
     from quant_core.data.query_helper import DataQueryHelper
@@ -60,7 +58,6 @@ def load_offline_factors(factor_names, start_date, end_date, universe_codes):
         df = df[valid_cols]
         
         # 4. 堆叠 (Stack) 为 Series，方便后续合并
-        # 转换 MultiIndex (datetime, sec_code)
         stacked = df.stack()
         stacked.name = f_name
         loaded_data[f_name] = stacked
@@ -86,7 +83,7 @@ if __name__ == '__main__':
     # 2. 数据准备
     print(f"\n--- 阶段 1: 数据准备 (资产池: {SELECTED_UNIVERSE}) ---")
     
-    # 初始化 Helper (BacktestEngine 仍需要它来获取 OHLCV 价格进行撮合)
+    # 初始化 Helper
     helper = DataQueryHelper(storage_path='data/processed/all_price_data.parquet')
     
     # 获取资产列表
@@ -98,7 +95,7 @@ if __name__ == '__main__':
     print("\n--- 阶段 2: 初始化策略与因子加载 ---")
     strategy_conf = config['strategy']['factor_strategy']
     
-    # 解析配置中的因子权重
+    # 解析因子权重
     if 'weights' in strategy_conf:
         factor_weights = strategy_conf['weights']
     else:
@@ -108,8 +105,10 @@ if __name__ == '__main__':
     
     factor_list = list(factor_weights.keys())
     
+    # 解析风控配置 (新增)
+    risk_conf = strategy_conf.get('risk_management', {})
+    
     # [关键步骤] 加载离线因子数据
-    # 这里不再进行计算，而是直接读取硬盘上的文件
     factor_data = load_offline_factors(
         factor_list, START_DATE, END_DATE, universe_codes
     )
@@ -118,14 +117,18 @@ if __name__ == '__main__':
         print("❌ 错误：未能加载任何因子数据，无法启动回测。")
         sys.exit(1)
 
-    # 实例化新策略
+    # 实例化新策略 (注入风控参数)
     strategy = LinearWeightedStrategy(
         name="Offline_Linear_Strategy",
         weights=factor_weights,
-        top_k=strategy_conf.get('top_n', 5)
+        top_k=strategy_conf.get('top_n', 5),
+        # --- 【修改】传入 Config 中的风控参数 ---
+        stop_loss_pct=risk_conf.get('stop_loss_pct'),
+        max_pos_weight=risk_conf.get('max_pos_weight'),
+        max_drawdown_pct=risk_conf.get('max_drawdown_pct')
     )
     
-    # [关键步骤] 注入数据
+    # 注入数据
     strategy.load_data(factor_data)
     print("✅ 策略初始化及离线数据注入完成。")
 
@@ -158,8 +161,6 @@ if __name__ == '__main__':
     # 尝试获取基准
     benchmark_equity = None
     try:
-        # 尝试使用 Helper 获取基准 (假设用 SPY)
-        # 如果你只跑 A 股，可以换成 '000300' 之类的
         bench_symbol = 'SPY' 
         bench_ret = helper.get_benchmark_returns(bench_symbol)
         
@@ -186,18 +187,16 @@ if __name__ == '__main__':
     # 简单绘图
     plt.figure(figsize=(12, 6))
     
-    # 归一化
     strat_norm = equity_curve / equity_curve.iloc[0]
     bench_norm = benchmark_equity / benchmark_equity.iloc[0]
     
     strat_norm.plot(label='Strategy', linewidth=2)
     bench_norm.plot(label='Benchmark', linestyle='--', alpha=0.7)
     
-    plt.title(f"Backtest Result: {list(factor_weights.keys())}")
+    plt.title(f"Backtest: {list(factor_weights.keys())} (StopLoss: {risk_conf.get('stop_loss_pct')})")
     plt.legend()
     plt.grid(True, alpha=0.3)
     
     output_path = f"backtest_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     plt.savefig(output_path)
     print(f"\n📊 结果图表已保存至: {output_path}")
-    # plt.show() # 服务器环境可注释

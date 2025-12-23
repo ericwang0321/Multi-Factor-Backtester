@@ -199,6 +199,31 @@ with st.sidebar:
         
         factor_weights = {f: st.number_input(f"Weight: {f}", 0.0, 1.0, 1.0/len(selected_factors), 0.05) for f in selected_factors} if selected_factors else {}
         
+        # --- [新增] 风控模块 ---
+        st.divider()
+        st.header("🛡️ Risk Management")
+        
+        # 1. 止损设置 (Stop Loss)
+        enable_stop_loss = st.checkbox("Enable Stop Loss", value=False, help="Sell stock if loss exceeds this %")
+        stop_loss_pct = None
+        if enable_stop_loss:
+            stop_loss_input = st.slider("Stop Loss % (Per Trade)", 1, 30, 10)
+            stop_loss_pct = stop_loss_input / 100.0
+            
+        # 2. 单票限仓 (Position Limit)
+        enable_pos_limit = st.checkbox("Enable Position Limit", value=True, help="Max weight for a single stock")
+        max_pos_weight = None
+        if enable_pos_limit:
+            max_pos_input = st.slider("Max Weight % (Per Stock)", 10, 100, 30)
+            max_pos_weight = max_pos_input / 100.0
+            
+        # 3. 熔断设置 (Circuit Breaker)
+        enable_circuit_breaker = st.checkbox("Enable Circuit Breaker", value=False, help="Close all positions if portfolio drawdown exceeds this %")
+        max_drawdown_pct = None
+        if enable_circuit_breaker:
+            dd_input = st.slider("Max Drawdown % (Portfolio)", 5, 50, 20)
+            max_drawdown_pct = dd_input / 100.0
+        
         st.divider()
         st.header("Costs & Execution")
         top_k = st.slider("Top K Stocks", 1, 20, 5)
@@ -274,11 +299,15 @@ elif app_mode == "Strategy Explorer":
                 if factor_data.empty:
                     st.error("No factor data generated. Please check data source.")
                 else:
-                    # --- C. 初始化新策略 ---
+                    # --- C. 初始化新策略 (带风控参数) ---
                     strategy = LinearWeightedStrategy(
                         name="App_Linear_Strategy", 
                         weights=factor_weights, 
-                        top_k=top_k
+                        top_k=top_k,
+                        # [新增] 注入前端设置的风控参数
+                        stop_loss_pct=stop_loss_pct,
+                        max_pos_weight=max_pos_weight,
+                        max_drawdown_pct=max_drawdown_pct
                     )
                     
                     # [关键] 注入因子数据

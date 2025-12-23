@@ -1,7 +1,7 @@
 # quant_core/strategies/rules.py
 import pandas as pd
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
 from .base import BaseStrategy
 
 class LinearWeightedStrategy(BaseStrategy):
@@ -15,19 +15,29 @@ class LinearWeightedStrategy(BaseStrategy):
     4. 选 Top-K。
     """
 
-    def __init__(self, name: str, weights: Dict[str, float], top_k: int = 5):
+    def __init__(self, name: str, weights: Dict[str, float], top_k: int = 5,
+                 # [修改 1] 新增风控参数接口
+                 stop_loss_pct: Optional[float] = None,
+                 max_pos_weight: Optional[float] = None,
+                 max_drawdown_pct: Optional[float] = None):
         """
         Args:
             name: 策略名
             weights: 因子权重字典, e.g., {'RSI': 0.4, 'Momentum': 0.6}
             top_k: 持仓数量
+            stop_loss_pct: 止损比例
+            max_pos_weight: 单票限仓
+            max_drawdown_pct: 熔断比例
         """
-        super().__init__(name, top_k)
+        # [修改 2] 将风控参数传递给父类 BaseStrategy
+        super().__init__(name, top_k, stop_loss_pct, max_pos_weight, max_drawdown_pct)
+        
         self.weights = weights
         
         # 归一化权重 (确保权重和为 1，虽然不强制，但为了规范)
-        total_w = sum(self.weights.values())
+        total_w = sum(abs(v) for v in self.weights.values()) # 使用绝对值求和
         if total_w != 0:
+            # 保持原始符号，只缩放大小
             self.weights = {k: v / total_w for k, v in self.weights.items()}
             
         print(f"[{self.name}] 因子权重配置: {self.weights}")
@@ -43,8 +53,7 @@ class LinearWeightedStrategy(BaseStrategy):
         # 2. 遍历每个因子进行加权
         for factor_name, weight in self.weights.items():
             if factor_name not in factor_df.columns:
-                # 如果预计算数据里没有这个因子，打印警告并跳过
-                # print(f"Warning: Factor '{factor_name}' not found in data.")
+                # 如果预计算数据里没有这个因子，可以选择打印警告或跳过
                 continue
             
             # 获取原始因子值
