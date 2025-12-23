@@ -6,6 +6,9 @@ import yaml
 import os
 import io
 from datetime import datetime
+import sys          # <--- 如果你要加刚才的“一键更新”功能，记得把这三个也加上
+import subprocess   # <--- 
+import time         # <---
 
 # 核心库导入
 from quant_core.data.query_helper import DataQueryHelper
@@ -154,7 +157,51 @@ with st.sidebar:
         start_date = col_s.date_input("Start", datetime(2018, 1, 1))
         end_date = col_e.date_input("End", datetime(2024, 7, 31))
         run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
+        
+    # --- [新增] 侧边栏底部：隐蔽的数据同步功能 ---
+    st.markdown("---")
+    with st.expander("📡 Data Status", expanded=False):
+        # 1. 显示当前数据日期
+        try:
+            # 获取 helper (如果上面没定义 helper，这里重新获取一下)
+            h_temp = get_query_helper()
+            mkt_summary = h_temp.get_market_summary()
+            if not mkt_summary.empty:
+                # 获取所有资产中最新的日期
+                latest_date = mkt_summary['end'].max()
+                st.caption(f"Data up to: **{latest_date.strftime('%Y-%m-%d')}**")
+            else:
+                st.caption("Data: Empty")
+        except Exception:
+            st.caption("Status: Unknown")
 
+        # 2. 刷新按钮
+        if st.button("🔄 Sync Now", use_container_width=True):
+            status_box = st.empty()
+            status_box.info("⏳ Connecting to IBKR...")
+            
+            try:
+                # 调用子进程运行 run_data_sync.py
+                result = subprocess.run(
+                    [sys.executable, "run_data_sync.py"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    status_box.success("✅ Complete!")
+                    # 关键：清除 Streamlit 缓存，否则它还会读取旧的 Parquet 文件
+                    st.cache_resource.clear()
+                    time.sleep(1)
+                    st.rerun() # 刷新页面
+                else:
+                    status_box.error("❌ Failed")
+                    with st.expander("Log"):
+                        st.code(result.stderr)
+            except Exception as e:
+                status_box.error(f"Err: {str(e)}")
+
+# --- Sidebar End ---
 if app_mode == "Data Explorer": 
     render_data_explorer()
 elif app_mode == "Analysis Explorer": 
