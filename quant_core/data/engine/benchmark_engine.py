@@ -121,6 +121,29 @@ def update_parquet_storage(new_df):
     finally:
         con.close()
 
+# ... (前面的 fetch_benchmark_data 和 update_parquet_storage 函数保持不变) ...
+
+# [新增/修改] 封装一个供外部调用的函数
+def sync_benchmarks(ib: IB):
+    """
+    供 DataManager 调用的接口
+    """
+    print("\n--- Starting Benchmark Sync ---")
+    all_data = []
+    for name, symbol in BENCHMARKS.items():
+        df = fetch_benchmark_data(ib, symbol)
+        if not df.empty:
+            print(f"   -> Got {len(df)} rows for {symbol}")
+            all_data.append(df)
+    
+    if all_data:
+        full_df = pd.concat(all_data)
+        update_parquet_storage(full_df)
+    else:
+        print("⚠️ No benchmark data downloaded.")
+    print("--- Benchmark Sync Finished ---\n")
+
+# [修改] main 函数仅用于独立测试
 def main():
     ib = IB()
     try:
@@ -128,18 +151,8 @@ def main():
         ib.connect('127.0.0.1', IB_PORT, clientId=CLIENT_ID)
         print("✅ Connected.")
         
-        all_data = []
-        for name, symbol in BENCHMARKS.items():
-            df = fetch_benchmark_data(ib, symbol)
-            if not df.empty:
-                print(f"   -> Got {len(df)} rows for {symbol}")
-                all_data.append(df)
-        
-        if all_data:
-            full_df = pd.concat(all_data)
-            update_parquet_storage(full_df)
-        else:
-            print("⚠️ No data downloaded.")
+        # 调用上面的封装函数
+        sync_benchmarks(ib)
 
     except Exception as e:
         print(f"❌ Error: {e}")

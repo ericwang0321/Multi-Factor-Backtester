@@ -5,6 +5,8 @@ import time
 import duckdb
 from datetime import datetime
 from .engine.us_equity_engine import USEquityEngine
+# [新增] 导入 benchmark 同步函数
+from .engine.benchmark_engine import sync_benchmarks
 
 class DataManager:
     """
@@ -33,16 +35,22 @@ class DataManager:
     def run_pipeline(self, sync=True, check=True, duration='15 Y'):
         """
         数据流水线唯一入口。
-        :param sync: 是否执行下载同步任务。
-        :param check: 是否执行 DuckDB 质量校验。
-        :param duration: 首次下载时的默认时间跨度。
         """
         print("="*60)
         print(f"🚀 数据流水线启动 | 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*60)
 
         if sync:
+            # 1. 执行原有的美股同步 (Equities)
             self._execute_sync(default_duration=duration)
+            
+            # [新增] 2. 执行基准同步 (Benchmarks)
+            # 放在股票同步之后，确保逻辑解耦
+            print("\n📡 步骤 1.5: 同步基准数据 (Benchmarks)...")
+            try:
+                sync_benchmarks(self.ib)
+            except Exception as e:
+                print(f"⚠️ 基准数据同步失败: {e}")
         
         if check:
             self._execute_quality_check()
