@@ -8,9 +8,8 @@ from datetime import datetime
 
 # --- 导入模块 ---
 try:
-    # [修改 1] 导入新策略和因子引擎
+    # [修改 1] 不需要导入 FactorEngine 了，因为我们直接读文件
     from quant_core.strategies.rules import LinearWeightedStrategy
-    from quant_core.factors.engine import FactorEngine
     
     from quant_core.backtest_engine import BacktestEngine
     from quant_core.performance import calculate_extended_metrics, display_metrics
@@ -23,35 +22,56 @@ def load_config(config_path='config.yaml'):
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
-# [新增] 临时数据准备函数 (与 App 逻辑一致)
-def prepare_factor_data(factor_engine, codes, factors, start_date, end_date):
-    print(f"正在内存中计算因子数据: {factors} ...")
+# [新增] 读取本地 parquet 因子的函数
+def load_offline_factors(factor_names, start_date, end_date, universe_codes):
+    """
+    从 data/processed/factors/ 读取预计算好的因子文件
+    """
+    base_dir = 'data/processed/factors'
+    loaded_data = {}
     
-    # 确保数据已初始化
-    if factor_engine.xarray_data is None:
-        factor_engine._get_xarray_data()
+    print(f"正在加载离线因子数据: {factor_names} ...")
+    
+    for f_name in factor_names:
+        file_path = os.path.join(base_dir, f"{f_name}.parquet")
         
-    data_dict = {}
-    for f_name in factors:
-        # 计算全量
-        df = factor_engine._compute_and_cache_factor(f_name)
-        if not df.empty:
-            # 截取 + 堆叠
-            # 转换为 (datetime, sec_code) MultiIndex
-            df_slice = df.loc[str(start_date):str(end_date)]
-            valid_cols = [c for c in df_slice.columns if c in codes]
-            if valid_cols:
-                stacked = df_slice[valid_cols].stack()
-                stacked.name = f_name
-                data_dict[f_name] = stacked
-            print(f"  - {f_name} 计算完成")
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            print(f"❌ 错误: 找不到因子文件 {file_path}")
+            print(f"👉 请先运行 'python run_factor_computation.py' 生成因子数据！")
+            sys.exit(1)
             
-    if not data_dict:
+        # 1. 读取 Parquet (宽表: Index=Date, Cols=Stocks)
+        try:
+            df = pd.read_parquet(file_path)
+        except Exception as e:
+            print(f"❌ 读取文件 {f_name} 失败: {e}")
+            sys.exit(1)
+        
+        # 2. 时间切片
+        df = df.loc[str(start_date):str(end_date)]
+        
+        # 3. 过滤 Universe (只保留当前资产池中的股票列)
+        valid_cols = [c for c in df.columns if c in universe_codes]
+        if not valid_cols:
+            print(f"⚠️ 警告: 因子 {f_name} 在当前资产池({len(universe_codes)})中没有数据。")
+            continue
+            
+        df = df[valid_cols]
+        
+        # 4. 堆叠 (Stack) 为 Series，方便后续合并
+        # 转换 MultiIndex (datetime, sec_code)
+        stacked = df.stack()
+        stacked.name = f_name
+        loaded_data[f_name] = stacked
+        
+    if not loaded_data:
         return pd.DataFrame()
         
-    # 合并为宽表
-    full_df = pd.concat(data_dict.values(), axis=1)
+    # 5. 合并为大表 (Strategy 需要的格式)
+    full_df = pd.concat(loaded_data.values(), axis=1)
     full_df.index.names = ['datetime', 'sec_code']
+    
     return full_df
 
 if __name__ == '__main__':
@@ -65,6 +85,8 @@ if __name__ == '__main__':
     
     # 2. 数据准备
     print(f"\n--- 阶段 1: 数据准备 (资产池: {SELECTED_UNIVERSE}) ---")
+    
+    # 初始化 Helper (BacktestEngine 仍需要它来获取 OHLCV 价格进行撮合)
     helper = DataQueryHelper(storage_path='data/processed/all_price_data.parquet')
     
     # 获取资产列表
@@ -73,41 +95,39 @@ if __name__ == '__main__':
     print(f"基础数据加载完成。总标的数: {len(universe_df)}")
 
     # 3. 初始化因子策略
-    print("\n--- 阶段 2: 初始化策略与因子计算 ---")
+    print("\n--- 阶段 2: 初始化策略与因子加载 ---")
     strategy_conf = config['strategy']['factor_strategy']
     
-    # 解析配置中的因子
-    # 兼容旧配置：如果 config 只有 factor_name，转为权重 1.0
+    # 解析配置中的因子权重
     if 'weights' in strategy_conf:
         factor_weights = strategy_conf['weights']
     else:
-        # 旧配置兼容
+        # 兼容旧配置
         f_name = strategy_conf.get('factor_name', 'rsi')
         factor_weights = {f_name: 1.0}
     
     factor_list = list(factor_weights.keys())
     
-    # [关键步骤] 实例化因子引擎并准备数据
-    # 这里是新架构的核心：策略运行前，数据必须就位
-    f_engine = FactorEngine(query_helper=helper)
-    factor_data = prepare_factor_data(
-        f_engine, universe_codes, factor_list, START_DATE, END_DATE
+    # [关键步骤] 加载离线因子数据
+    # 这里不再进行计算，而是直接读取硬盘上的文件
+    factor_data = load_offline_factors(
+        factor_list, START_DATE, END_DATE, universe_codes
     )
     
     if factor_data.empty:
-        print("❌ 错误：未能计算出任何因子数据，请检查数据源或因子名称。")
+        print("❌ 错误：未能加载任何因子数据，无法启动回测。")
         sys.exit(1)
 
     # 实例化新策略
     strategy = LinearWeightedStrategy(
-        name="CLI_Linear_Strategy",
+        name="Offline_Linear_Strategy",
         weights=factor_weights,
         top_k=strategy_conf.get('top_n', 5)
     )
     
     # [关键步骤] 注入数据
     strategy.load_data(factor_data)
-    print("✅ 策略初始化及数据注入完成。")
+    print("✅ 策略初始化及离线数据注入完成。")
 
     # 4. 执行回测
     print("\n--- 阶段 3: 执行回测 ---")
@@ -130,27 +150,28 @@ if __name__ == '__main__':
     )
     
     # 运行
-    # 注意：engine.factor_engine.current_weights 不需要再设置了，策略自己全权负责
     portfolio_history, final_portfolio = engine.run()
 
     # 5. 结果展示
     print("\n--- 阶段 4: 结果分析 ---")
     
-    # 尝试获取基准 (这里简化处理，尝试读 CSV，读不到就画平线)
+    # 尝试获取基准
     benchmark_equity = None
     try:
-        # 尝试使用 Helper 获取基准 (如果你的 Helper 有这个功能)
-        # 这里假设用 SPY 做基准
-        bench_ret = helper.get_benchmark_returns('SPY')
+        # 尝试使用 Helper 获取基准 (假设用 SPY)
+        # 如果你只跑 A 股，可以换成 '000300' 之类的
+        bench_symbol = 'SPY' 
+        bench_ret = helper.get_benchmark_returns(bench_symbol)
+        
         if not bench_ret.empty:
             bench_ret = bench_ret.loc[START_DATE:END_DATE]
             benchmark_equity = (1 + bench_ret).cumprod() * BACKTEST_CONFIG['INITIAL_CAPITAL']
             benchmark_equity = benchmark_equity.reindex(portfolio_history.index, method='ffill').fillna(BACKTEST_CONFIG['INITIAL_CAPITAL'])
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ 基准数据获取失败 ({e})，使用平线基准。")
         pass
         
     if benchmark_equity is None:
-        print("⚠️ 未找到基准数据，使用无风险基准。")
         benchmark_equity = pd.Series(BACKTEST_CONFIG['INITIAL_CAPITAL'], index=portfolio_history.index)
 
     equity_curve = portfolio_history['total_value']
@@ -164,6 +185,8 @@ if __name__ == '__main__':
 
     # 简单绘图
     plt.figure(figsize=(12, 6))
+    
+    # 归一化
     strat_norm = equity_curve / equity_curve.iloc[0]
     bench_norm = benchmark_equity / benchmark_equity.iloc[0]
     
@@ -177,3 +200,4 @@ if __name__ == '__main__':
     output_path = f"backtest_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     plt.savefig(output_path)
     print(f"\n📊 结果图表已保存至: {output_path}")
+    # plt.show() # 服务器环境可注释
