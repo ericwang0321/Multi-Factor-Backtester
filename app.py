@@ -128,9 +128,14 @@ with st.sidebar:
     
     if app_mode == "Strategy Explorer":
         st.header("Parameters")
-        bench_options = {"S&P 500 (SPXT)": "spxt_index_daily_return.csv", "Global Equity (MXWD)": "mxwd_index_daily_return.csv", "Commodity (BCOM)": "bcom_index_daily_return.csv", "Global Bond": "global_bond_index_daily_return.csv"}
+        # [修改] 映射显示名称到数据库中的 ETF 代码
+        bench_options = {
+            "S&P 500 (SPY)": "SPY", 
+            "Global Equity (ACWI)": "ACWI", 
+            "Global Bond (AGG)": "AGG", 
+            "Commodities (GSG)": "GSG"
+        }
         selected_bench_label = st.selectbox("Compare against Benchmark", list(bench_options.keys()))
-        
         # 从 Helper 获取全量数据以提取 Columns 列表 (如果需要) 
         # 或者直接使用注册表中的因子列表
         # 这里为了简单，我们用硬编码或从引擎获取
@@ -194,19 +199,30 @@ elif app_mode == "Strategy Explorer":
                     equity_df, final_portfolio = engine.run()
 
                     # --- D. 处理基准数据 (Benchmark) ---
-                    bench_file = bench_options[selected_bench_label]
-                    bench_path = os.path.join("data", "processed", bench_file)
+                    # [修改] 使用 helper 直接从数据库获取收益率，不再读取 CSV
+                    bench_symbol = bench_options[selected_bench_label]
+                    b_rets = helper.get_benchmark_returns(bench_symbol)
                     
-                    if os.path.exists(bench_path):
-                        b_raw = pd.read_csv(bench_path)
-                        b_raw['report_date'] = pd.to_datetime(b_raw['report_date'])
-                        b_raw = b_raw.set_index('report_date').sort_index()
-                        b_rets = b_raw.loc[start_date.strftime('%Y-%m-%d'):end_date.strftime('%Y-%m-%d'), 'default']
+                    if not b_rets.empty:
+                        # 截取回测时间段
+                        # 注意：series.loc 切片包含端点，确保索引是 datetime 类型
+                        s_ts = pd.Timestamp(start_date)
+                        e_ts = pd.Timestamp(end_date)
+                        b_rets = b_rets.loc[s_ts:e_ts]
+                        
+                        # 计算净值曲线 (从初始资金开始复利)
                         benchmark_equity = (1 + b_rets).cumprod() * bt_config['INITIAL_CAPITAL']
+                        
+                        # [关键] 对齐索引：防止基准交易日与策略不一致（如美股休市与港股休市不同）
+                        # 使用 reindex 将基准强制对齐到策略的日期轴，缺失值前向填充
+                        benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill')
+                        
+                        # 如果起始日没有数据，填充为初始资金
+                        benchmark_equity = benchmark_equity.fillna(bt_config['INITIAL_CAPITAL'])
                     else:
-                        st.warning(f"⚠️ Benchmark file not found: {bench_path}")
+                        st.warning(f"⚠️ Benchmark data not found for {bench_symbol}. Using flat line.")
                         benchmark_equity = pd.Series(bt_config['INITIAL_CAPITAL'], index=equity_df.index)
-
+                        
                     # --- E. 计算最终指标 ---
                     metrics = calculate_extended_metrics(equity_df['total_value'], benchmark_equity, final_portfolio)
                     
