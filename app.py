@@ -6,16 +6,17 @@ import yaml
 import os
 import io
 from datetime import datetime
-import sys          # <--- 如果你要加刚才的“一键更新”功能，记得把这三个也加上
-import subprocess   # <--- 
-import time         # <---
+import sys
+import subprocess
+import time
 
-# 核心库导入
+# --- 核心库导入 (适配新架构) ---
 from quant_core.data.query_helper import DataQueryHelper
-# from quant_core.data_handler import DataHandler # ❌ 已删除
-from quant_core.strategy import FactorTopNStrategy
+# [修改] 导入新的策略类
+from quant_core.strategies.rules import LinearWeightedStrategy
 from quant_core.backtest_engine import BacktestEngine
 from quant_core.performance import calculate_extended_metrics
+from quant_core.factors.engine import FactorEngine  # 需要用它来准备数据
 
 # EDA 分析模块导入
 from quant_core.analysis.task_runner import FactorTaskRunner
@@ -37,9 +38,61 @@ def get_query_helper():
     return DataQueryHelper(storage_path='data/processed/all_price_data.parquet')
 
 @st.cache_resource
+def get_factor_engine(_query_helper):
+    """
+    获取因子引擎实例 (用于在 App 中临时计算因子)
+    """
+    return FactorEngine(query_helper=_query_helper)
+
+@st.cache_resource
 def get_analysis_runner(_query_helper):
-    """Initialize with QueryHelper instead of DataHandler"""
     return FactorTaskRunner(_query_helper)
+
+# [新增] 专门为新策略准备数据的函数
+def prepare_factor_data_for_strategy(_engine, codes, factors, start_date, end_date):
+    """
+    在内存中计算选定因子的历史数据，并转换为 Strategy 需要的 MultiIndex DataFrame。
+    """
+    # 确保数据已初始化
+    if _engine.xarray_data is None:
+        _engine._get_xarray_data()
+        
+    data_dict = {}
+    
+    # 进度条
+    progress_text = "Computing factors in-memory..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    total = len(factors)
+    for i, f_name in enumerate(factors):
+        # 调用 FactorEngine 计算全量历史
+        df = _engine._compute_and_cache_factor(f_name)
+        
+        if not df.empty:
+            # 截取时间段 (为了性能，虽然 Engine 算的是全量)
+            # 转为 stack 格式: index=[datetime, sec_code], value=factor_value
+            df_slice = df.loc[str(start_date):str(end_date)]
+            # 过滤 Universe
+            valid_cols = [c for c in df_slice.columns if c in codes]
+            if valid_cols:
+                stacked = df_slice[valid_cols].stack()
+                stacked.name = f_name
+                data_dict[f_name] = stacked
+        
+        my_bar.progress((i + 1) / total, text=f"Computed {f_name}")
+    
+    my_bar.empty()
+    
+    if not data_dict:
+        return pd.DataFrame()
+        
+    # 合并为大宽表 (Index: datetime, sec_code; Columns: factor1, factor2...)
+    full_factor_df = pd.concat(data_dict.values(), axis=1)
+    
+    # 确保索引名为 datetime, sec_code 以匹配 BaseStrategy 的逻辑
+    full_factor_df.index.names = ['datetime', 'sec_code']
+    
+    return full_factor_df
 
 # --- Module 1: Data Explorer ---
 def render_data_explorer():
@@ -125,13 +178,11 @@ with st.sidebar:
     st.header("Navigation")
     app_mode = st.radio("Choose Module", ["Strategy Explorer", "Data Explorer", "Analysis Explorer"])
     
-    # 加载配置和 Helper
     config = load_config('config.yaml')
-    helper = get_query_helper() # 获取唯一的 QueryHelper 实例
+    helper = get_query_helper()
     
     if app_mode == "Strategy Explorer":
         st.header("Parameters")
-        # [修改] 映射显示名称到数据库中的 ETF 代码
         bench_options = {
             "S&P 500 (SPY)": "SPY", 
             "Global Equity (ACWI)": "ACWI", 
@@ -139,35 +190,32 @@ with st.sidebar:
             "Commodities (GSG)": "GSG"
         }
         selected_bench_label = st.selectbox("Compare against Benchmark", list(bench_options.keys()))
-        # 从 Helper 获取全量数据以提取 Columns 列表 (如果需要) 
-        # 或者直接使用注册表中的因子列表
-        # 这里为了简单，我们用硬编码或从引擎获取
+        
+        # 获取因子列表
         runner_temp = get_analysis_runner(helper)
         available_factors = sorted(list(runner_temp.factor_engine.FACTOR_REGISTRY.keys()))
         
         selected_factors = st.multiselect("Select Factors", available_factors, default=['momentum', 'rsi'])
         
         factor_weights = {f: st.number_input(f"Weight: {f}", 0.0, 1.0, 1.0/len(selected_factors), 0.05) for f in selected_factors} if selected_factors else {}
+        
         st.divider()
         st.header("Costs & Execution")
+        top_k = st.slider("Top K Stocks", 1, 20, 5)
         comm_rate = st.number_input("Commission Rate", 0.0, 0.01, 0.0010, format="%.4f")
         slip_rate = st.number_input("Slippage Rate", 0.0, 0.01, 0.0005, format="%.4f")
         rebalance_days = st.slider("Rebalance Frequency", 1, 60, 20)
-        col_s, col_e = st.columns(2)
+        col_s, col_r = st.columns(2)
         start_date = col_s.date_input("Start", datetime(2018, 1, 1))
-        end_date = col_e.date_input("End", datetime(2024, 7, 31))
+        end_date = col_r.date_input("End", datetime(2024, 7, 31))
         run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
         
-    # --- [新增] 侧边栏底部：隐蔽的数据同步功能 ---
     st.markdown("---")
     with st.expander("📡 Data Status", expanded=False):
-        # 1. 显示当前数据日期
         try:
-            # 获取 helper (如果上面没定义 helper，这里重新获取一下)
             h_temp = get_query_helper()
             mkt_summary = h_temp.get_market_summary()
             if not mkt_summary.empty:
-                # 获取所有资产中最新的日期
                 latest_date = mkt_summary['end'].max()
                 st.caption(f"Data up to: **{latest_date.strftime('%Y-%m-%d')}**")
             else:
@@ -175,33 +223,24 @@ with st.sidebar:
         except Exception:
             st.caption("Status: Unknown")
 
-        # 2. 刷新按钮
         if st.button("🔄 Sync Now", use_container_width=True):
             status_box = st.empty()
             status_box.info("⏳ Connecting to IBKR...")
-            
             try:
-                # 调用子进程运行 run_data_sync.py
-                result = subprocess.run(
-                    [sys.executable, "run_data_sync.py"],
-                    capture_output=True,
-                    text=True
-                )
-                
+                result = subprocess.run([sys.executable, "run_data_sync.py"], capture_output=True, text=True)
                 if result.returncode == 0:
                     status_box.success("✅ Complete!")
-                    # 关键：清除 Streamlit 缓存，否则它还会读取旧的 Parquet 文件
                     st.cache_resource.clear()
                     time.sleep(1)
-                    st.rerun() # 刷新页面
+                    st.rerun()
                 else:
                     status_box.error("❌ Failed")
-                    with st.expander("Log"):
-                        st.code(result.stderr)
+                    with st.expander("Log"): st.code(result.stderr)
             except Exception as e:
                 status_box.error(f"Err: {str(e)}")
 
 # --- Sidebar End ---
+
 if app_mode == "Data Explorer": 
     render_data_explorer()
 elif app_mode == "Analysis Explorer": 
@@ -209,71 +248,73 @@ elif app_mode == "Analysis Explorer":
 elif app_mode == "Strategy Explorer":
     st.title("Quantitative Strategy Explorer")
     
-    # 1. 运行按钮逻辑
     if run_btn:
         if not selected_factors:
             st.error("Error: Please select at least one factor.")
         else:
-            with st.spinner('Running simulation...'):
-                try:
-                    # --- A. 准备回测参数 ---
-                    bt_config = {
-                        'INITIAL_CAPITAL': 1000000, 
-                        'COMMISSION_RATE': comm_rate, 
-                        'SLIPPAGE': slip_rate, 
-                        'REBALANCE_DAYS': rebalance_days
-                    }
+            try:
+                # --- A. 准备配置 ---
+                bt_config = {
+                    'INITIAL_CAPITAL': 1000000, 
+                    'COMMISSION_RATE': comm_rate, 
+                    'SLIPPAGE': slip_rate, 
+                    'REBALANCE_DAYS': rebalance_days
+                }
+                
+                # --- B. 数据准备 ---
+                u_df = helper.get_all_symbols()
+                universe_codes = u_df['sec_code'].tolist()
+                
+                # [核心步骤] 准备因子数据 (内存计算)
+                f_engine = get_factor_engine(helper)
+                factor_data = prepare_factor_data_for_strategy(
+                    f_engine, universe_codes, selected_factors, start_date, end_date
+                )
+                
+                if factor_data.empty:
+                    st.error("No factor data generated. Please check data source.")
+                else:
+                    # --- C. 初始化新策略 ---
+                    strategy = LinearWeightedStrategy(
+                        name="App_Linear_Strategy", 
+                        weights=factor_weights, 
+                        top_k=top_k
+                    )
                     
-                    # --- B. 初始化数据与策略 ---
-                    # 使用 QueryHelper 获取 Universe (所有 distinct symbols)
-                    u_df = helper.get_all_symbols()
+                    # [关键] 注入因子数据
+                    strategy.load_data(factor_data)
                     
-                    # 初始化策略
-                    strategy = FactorTopNStrategy(universe_df=u_df, factor_weights=factor_weights, top_n=5)
-                    
-                    # 初始化引擎 (传入 helper)
+                    # --- D. 初始化引擎 ---
                     engine = BacktestEngine(
                         start_date=start_date.strftime('%Y-%m-%d'), 
                         end_date=end_date.strftime('%Y-%m-%d'), 
                         config=bt_config, 
                         strategy=strategy, 
-                        query_helper=helper # 关键修改：传入 query_helper
+                        query_helper=helper
                     )
-                    # 注入权重
-                    engine.factor_engine.current_weights = factor_weights 
                     
-                    # --- C. 执行回测 ---
-                    equity_df, final_portfolio = engine.run()
+                    # --- E. 运行 ---
+                    with st.spinner('Running simulation...'):
+                        equity_df, final_portfolio = engine.run()
 
-                    # --- D. 处理基准数据 (Benchmark) ---
-                    # [修改] 使用 helper 直接从数据库获取收益率，不再读取 CSV
+                    # --- F. 基准与指标 ---
                     bench_symbol = bench_options[selected_bench_label]
                     b_rets = helper.get_benchmark_returns(bench_symbol)
                     
                     if not b_rets.empty:
-                        # 截取回测时间段
-                        # 注意：series.loc 切片包含端点，确保索引是 datetime 类型
                         s_ts = pd.Timestamp(start_date)
                         e_ts = pd.Timestamp(end_date)
                         b_rets = b_rets.loc[s_ts:e_ts]
-                        
-                        # 计算净值曲线 (从初始资金开始复利)
                         benchmark_equity = (1 + b_rets).cumprod() * bt_config['INITIAL_CAPITAL']
-                        
-                        # [关键] 对齐索引：防止基准交易日与策略不一致（如美股休市与港股休市不同）
-                        # 使用 reindex 将基准强制对齐到策略的日期轴，缺失值前向填充
-                        benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill')
-                        
-                        # 如果起始日没有数据，填充为初始资金
-                        benchmark_equity = benchmark_equity.fillna(bt_config['INITIAL_CAPITAL'])
+                        # 对齐数据
+                        benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill').fillna(bt_config['INITIAL_CAPITAL'])
                     else:
-                        st.warning(f"⚠️ Benchmark data not found for {bench_symbol}. Using flat line.")
+                        st.warning(f"Benchmark data missing for {bench_symbol}")
                         benchmark_equity = pd.Series(bt_config['INITIAL_CAPITAL'], index=equity_df.index)
                         
-                    # --- E. 计算最终指标 ---
                     metrics = calculate_extended_metrics(equity_df['total_value'], benchmark_equity, final_portfolio)
                     
-                    # --- F. 存入 Session State ---
+                    # 存入 Session State
                     st.session_state.bt_ready = True
                     st.session_state.equity_df = equity_df
                     st.session_state.metrics = metrics
@@ -282,24 +323,24 @@ elif app_mode == "Strategy Explorer":
                     st.session_state.engine = engine
                     st.session_state.selected_factors = selected_factors
                     st.session_state.bench_label = selected_bench_label
-                
-                except Exception as e:
-                    st.error(f"Runtime Error: {str(e)}")
-                    import traceback
-                    st.code(traceback.format_exc())
+            
+            except Exception as e:
+                st.error(f"Runtime Error: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
 
-    # 2. 结果渲染
+    # --- 结果展示 (完全恢复) ---
     if st.session_state.get('bt_ready'):
         m = st.session_state.metrics
         
-        # 指标卡片
+        # 1. 关键指标卡片
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Alpha (Excess)", f"{m.get('Alpha', 0):+.2%}")
         c2.metric("Sharpe Ratio", f"{m.get('Sharpe Ratio', 0):.2f}")
         c3.metric("Info Ratio", f"{m.get('Info Ratio', 0):.2f}")
         c4.metric("Beta", f"{m.get('Beta', 0):.2f}")
 
-        # 成本
+        # 2. 成本与回撤
         st.divider()
         st.subheader("Transaction Cost Attribution")
         ct1, ct2, ct3, ct4 = st.columns(4)
@@ -308,7 +349,7 @@ elif app_mode == "Strategy Explorer":
         ct3.metric("Slippage", f"${m.get('Slippage', 0):,.0f}")
         ct4.metric("Max Drawdown", f"{m.get('Max Drawdown', 0):.2%}")
 
-        # 下载
+        # 3. Excel 下载
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             summary_df = pd.DataFrame.from_dict({k: v for k, v in m.items() if not isinstance(v, pd.Series)}, orient='index', columns=['Value'])
@@ -317,11 +358,14 @@ elif app_mode == "Strategy Explorer":
             ts_df.to_excel(writer, sheet_name='Comparison')
         st.download_button("Download Excel Report", buffer.getvalue(), f"Backtest_Report.xlsx", use_container_width=True)
 
-        # 双轴图表
+        # 4. 净值曲线图 (Plotly)
         st.subheader(f"Strategy vs {st.session_state.bench_label}")
         fig = go.Figure()
+        # 策略曲线
         fig.add_trace(go.Scatter(x=m['strategy_curve'].index, y=m['strategy_curve'], name='Strategy', line=dict(color='#0B3D59', width=2.5)))
+        # 基准曲线
         fig.add_trace(go.Scatter(x=m['benchmark_curve'].index, y=m['benchmark_curve'], name=st.session_state.bench_label, line=dict(color='#5EA9CE', width=2, dash='dot')))
+        # 超额收益 (阴影区)
         fig.add_trace(go.Scatter(x=m['excess_curve'].index, y=m['excess_curve'], name='Excess Return', yaxis='y2', fill='tozeroy', line=dict(color='#8E44AD', width=1.5), fillcolor='rgba(142, 68, 173, 0.2)'))
         
         fig.update_layout(
@@ -332,34 +376,46 @@ elif app_mode == "Strategy Explorer":
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # 底部 Tab
+        # 5. 详细分析 Tab
         st.divider()
         nav_options = ["Performance", "Signals", "Holdings", "Factor Correlation", "Risk Analysis"]
         active_tab = st.radio("Analysis View", nav_options, horizontal=True, key="active_nav_tab")
 
         if active_tab == "Performance":
             st.table(pd.DataFrame.from_dict({k: v for k, v in m.items() if not isinstance(v, pd.Series)}, orient='index', columns=['Value']).astype(str))
+        
         elif active_tab == "Signals":
-            st.dataframe(st.session_state.strategy.get_trade_log(), use_container_width=True)
+            # 注意：如果 BaseStrategy 里没写日志记录，这里可能是空的。
+            # 通常我们在 Engine 里记录 trade_log，这里尝试获取
+            st.info("Trade signals log (from Engine):")
+            st.dataframe(st.session_state.strategy.get_trade_log() if hasattr(st.session_state.strategy, 'get_trade_log') else pd.DataFrame(), use_container_width=True)
+            
         elif active_tab == "Holdings":
             st.dataframe(st.session_state.final_portfolio.get_holdings_history(), use_container_width=True)
+            
         elif active_tab == "Factor Correlation":
             st.subheader("Dynamic Factor Correlation Analysis")
-            current_factors = st.session_state.get('selected_factors', [])
-            if len(current_factors) > 1:
+            # 从 strategy 对象里直接取刚才算好的 factor_data
+            if hasattr(st.session_state.strategy, 'factor_data') and st.session_state.strategy.factor_data is not None:
+                fd = st.session_state.strategy.factor_data
+                
+                # 时间滑块
                 a_range = st.slider("Select Analysis Period", min_value=start_date, max_value=end_date, value=(start_date, end_date), format="YYYY-MM-DD", key="corr_slider")
-                f_list = []
-                for fn in current_factors:
-                    if fn in st.session_state.engine.factor_engine._factor_cache:
-                        f_cache = st.session_state.engine.factor_engine._factor_cache[fn]
-                        f_slice = f_cache.loc[a_range[0].strftime('%Y-%m-%d'):a_range[1].strftime('%Y-%m-%d')].stack()
-                        f_slice.name = fn
-                        f_list.append(f_slice)
-                if f_list:
-                    corr_m = pd.concat(f_list, axis=1).corr()
-                    st.plotly_chart(px.imshow(corr_m, text_auto=".2f", color_continuous_scale='RdBu_r', zmin=-1, zmax=1), use_container_width=True)
+                
+                # 切片 (index level 0 is datetime)
+                try:
+                    fd_slice = fd.loc[str(a_range[0]):str(a_range[1])]
+                    if not fd_slice.empty:
+                        # factor_data 已经是宽表了 (columns=factor names)，直接 corr()
+                        corr_m = fd_slice.corr()
+                        st.plotly_chart(px.imshow(corr_m, text_auto=".2f", color_continuous_scale='RdBu_r', zmin=-1, zmax=1), use_container_width=True)
+                    else:
+                        st.warning("No data in selected range.")
+                except Exception as e:
+                    st.error(f"Error filtering data: {e}")
             else:
-                st.info("Select at least 2 factors to see correlation matrix.")
+                st.info("No factor data available.")
+                
         elif active_tab == "Risk Analysis":
             st.subheader("Daily Risk Exposure (95% Confidence)")
             if 'rolling_var_series' in m:
@@ -369,4 +425,4 @@ elif app_mode == "Strategy Explorer":
                 st.plotly_chart(fig_r, use_container_width=True)
                 st.markdown(f"**Metrics**: 95% Historical VaR: **{abs(m.get('VaR_95', 0)):.2%}**, 95% ES: **{abs(m.get('ES_95', 0)):.2%}**.")
     else:
-        st.info("Configure the parameters and click 'Run Backtest' to see results.")
+        st.info("👈 Configure parameters on the left and click 'Run Backtest' to start.")

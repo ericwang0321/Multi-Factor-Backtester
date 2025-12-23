@@ -1,7 +1,7 @@
 # 路径配置
 paths:
-  price_data_csv: "data/processed/price_with_simple_returns_2016_onwards.csv"
-  universe_definition: "data/reference/sec_code_category_grouped.csv"
+  # [修改] 指向 Parquet 数据文件 (代码中其实硬编码了，但放这里备查是个好习惯)
+  parquet_data: "data/processed/all_price_data.parquet"
   plot_dir_base: "plots"
   log_dir_base: "logs"
 
@@ -12,17 +12,24 @@ backtest:
   initial_capital: 1000000
   commission_rate: 0.001
   slippage: 0.0005
-  rebalance_days: 20        # 【新增】每隔 20 个交易日调仓 (约 1 个月)
-  rebalance_months: 1       # 【保留】若 rebalance_days 设为 null 则按月调仓
-  factor_buffer_months: 12  # 因子计算缓冲期
+  rebalance_days: 20        # 按每 20 个交易日调仓
+  rebalance_months: 1       # (备用) 若 rebalance_days 为 null 则按月调仓
 
-# 策略配置
+# 策略配置 (适配 LinearWeightedStrategy)
 strategy:
   factor_strategy:
-    universe_to_trade: "All"  # 可选具体资产池名称
-    factor_name: "trend_score" # 【关键】输入 factor_definitions.py 中注册的因子名
-    top_n: 5                  # 持仓 ETF 数量
-    ascending: False          # False 表示因子值越大越好 (Score 降序)
+    universe_to_trade: "All"  # 资产池选择: 'All', 'SP500', 'ETF' 等 (需 DataQueryHelper 支持)
+    
+    # [核心修改] 使用权重字典，支持多因子
+    # 正数表示正相关(越大越好)，负数表示负相关(越小越好)
+    weights:
+      momentum: 1.0           # 动量因子
+      rsi: -0.5               # RSI (通常视为反转指标，过高要卖，所以给负权重)
+      # trend_score: 1.0      # 你可以随时解注添加更多因子
+    
+    top_n: 5                  # 持仓数量
 
-# 因子列表 (供参考，确保 FactorEngine 的 REGISTRY 中有这些)
-# 可选: alpha001, momentum, trend_score, volatility, turnover_mean 等
+# 废弃参数说明 (已删除):
+# - price_data_csv: 已被 Parquet 替代
+# - factor_name: 已被 weights 替代
+# - ascending: 已被 weights 的正负号替代
