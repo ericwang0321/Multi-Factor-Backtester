@@ -511,7 +511,6 @@ class DV_Divergence(BaseAlpha):
         volume_pct = pct_change(self.volume, self.price_window)
         # 由於ts_corr是基於xarray的，這裡直接使用它
         # 假設 ts_corr 函數已在您的因子庫中定義
-        from __main__ import ts_corr 
         return ts_corr(price_pct, volume_pct, self.corr_window)
     
 # --- 3.1 中信期貨報告因子 (CITIC Futures Report Factors) ---

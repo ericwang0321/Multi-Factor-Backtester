@@ -7,9 +7,11 @@ import statsmodels.api as sm
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 
-# 从同级目录导入数据处理器和新的因子定义文件
-from .data_handler import DataHandler
-from .factor_definitions import * # 导入所有 BaseAlpha 因子类和辅助函数
+# --- 修改 1: 引用路径调整 ---
+# 从同级目录导入因子定义
+from .definitions import * # 从上级 data 目录导入新的查询助手 (这就是我们通过架构图确定的关系)
+from ..data.query_helper import DataQueryHelper
+from ..data_handler import DataHandler
 
 class FactorEngine:
     """

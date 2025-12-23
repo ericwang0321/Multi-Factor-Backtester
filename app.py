@@ -254,8 +254,32 @@ elif app_mode == "Strategy Explorer":
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=m['strategy_curve'].index, y=m['strategy_curve'], name='Strategy', line=dict(color='#0B3D59', width=2.5)))
         fig.add_trace(go.Scatter(x=m['benchmark_curve'].index, y=m['benchmark_curve'], name=st.session_state.bench_label, line=dict(color='#5EA9CE', width=2, dash='dot')))
-        fig.add_trace(go.Scatter(x=m['excess_curve'].index, y=m['excess_curve'], name='Excess Return', yaxis='y2', fill='tozeroy', line=dict(color='#8E44AD', width=1.5), fillcolor='rgba(142, 68, 173, 0.2)'))
-        fig.update_layout(hovermode="x unified", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.add_trace(go.Scatter(x=m['excess_curve'].index, y=m['excess_curve'], name='Excess Return', yaxis='y2', fill='tozeroy', line=dict(color='#8E44AD', width=1.5), fillcolor='rgba(142, 68, 173, 0.2)'))        
+        # 4. 布局配置 (这是修复双轴显示的关键！)
+        fig.update_layout(
+            hovermode="x unified", 
+            template="plotly_white",
+            legend=dict(
+                orientation="h", 
+                yanchor="bottom", 
+                y=1.02, 
+                xanchor="right", 
+                x=1
+            ),
+            # --- 必须显式定义两个 Y 轴 ---
+            # 左侧 Y 轴配置 (净值)
+            yaxis=dict(
+                title=dict(text="Normalized Value", font=dict(color="#0B3D59")), 
+                tickfont=dict(color="#0B3D59")
+            ),
+            # 右侧 Y 轴配置 (超额收益)
+            yaxis2=dict(
+                title=dict(text="Cumulative Excess Return", font=dict(color="#8E44AD")), 
+                tickfont=dict(color="#8E44AD"), 
+                overlaying="y",  # <--- 关键：声明覆盖在主轴上
+                side="right"     # <--- 关键：放置在右侧
+            )
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         st.divider()

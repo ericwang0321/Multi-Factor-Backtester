@@ -8,7 +8,9 @@ from typing import Dict, List, Optional
 from .portfolio import Portfolio
 from .strategy import BaseStrategy
 from .data_handler import DataHandler
-from .factor_engine import FactorEngine
+# 原来: from .factor_engine import FactorEngine
+# 修改为: 从当前包的 factors 子包导入 engine
+from .factors.engine import FactorEngine
 
 class BacktestEngine:
     """

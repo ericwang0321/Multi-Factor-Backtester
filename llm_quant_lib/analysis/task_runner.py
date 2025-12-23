@@ -4,7 +4,9 @@ import numpy as np
 import os
 from .preprocessor import FactorPreprocessor
 from .research_engine import FactorResearchEngine
-from ..factor_engine import FactorEngine
+# 原来: from ..factor_engine import FactorEngine
+# 修改为: 从上一级的 factors 包里导入 engine 模块
+from ..factors.engine import FactorEngine
 
 class FactorTaskRunner:
     """

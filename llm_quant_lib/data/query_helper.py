@@ -30,3 +30,16 @@ class DataQueryHelper:
             GROUP BY category_id
         """
         return duckdb.query(sql).to_df()
+    
+    # 请把这段代码加到 DataQueryHelper 类里
+    def get_all_price_data(self):
+        """
+        [新增] 供 FactorEngine 使用：一次性加载全量数据以构建矩阵
+        """
+        # 按 sec_code 和 datetime 排序，保证 Xarray 转换时索引正确
+        query = f"SELECT * FROM '{self.storage_path}' ORDER BY sec_code, datetime"
+        df = duckdb.query(query).to_df()
+        
+        # 强制转换时间格式，防止字符串报错
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        return df
