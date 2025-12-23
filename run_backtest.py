@@ -9,7 +9,6 @@ from datetime import datetime
 
 # --- 导入模块 ---
 try:
-    from llm_quant_lib.data_handler import DataHandler
     from llm_quant_lib.strategy import FactorTopNStrategy  # 切换为因子策略
     from llm_quant_lib.backtest_engine import BacktestEngine
     from llm_quant_lib.performance import calculate_extended_metrics, display_metrics
