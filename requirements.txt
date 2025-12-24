@@ -2,6 +2,7 @@ altair==6.0.0
 annotated-types==0.7.0
 anyio==4.11.0
 appnope==0.1.4
+APScheduler==3.11.2
 asttokens==3.0.0
 attrs==25.4.0
 backcall==0.2.0
@@ -110,6 +111,7 @@ traitlets==5.14.3
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.2
+tzlocal==5.3.1
 urllib3==2.5.0
 wcwidth==0.2.14
 webencodings==0.5.1

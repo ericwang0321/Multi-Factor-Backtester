@@ -1,17 +1,9 @@
 {
-  "status": "Monitoring",
-  "strategy": "linear",
-  "logs": [
-    "System Initialized",
-    "Trading Logic Completed",
-    "Entering Monitor Mode"
-  ],
-  "account": {
-    "total_equity": 134785.54,
-    "unrealized_pnl": 0.0,
-    "positions": {},
-    "avg_costs": {}
-  },
-  "updated_at": "2025-12-24 14:28:37",
-  "last_update": "14:28:37"
+  "total_equity": 134759.89,
+  "unrealized_pnl": 0.0,
+  "positions": {},
+  "avg_costs": {},
+  "status": "Running (Auto)",
+  "next_run": "2025-12-24 09:30:00-05:00",
+  "updated_at": "2025-12-24 20:04:36"
 }

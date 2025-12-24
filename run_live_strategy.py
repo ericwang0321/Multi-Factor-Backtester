@@ -1,280 +1,277 @@
 # run_live_strategy.py
-import pandas as pd
-import numpy as np
-import math
-import time
-import json
+import asyncio
 import os
 import sys
-from datetime import datetime
+import json
+import math
 import traceback
+import pandas as pd
+from datetime import datetime
+from pytz import timezone
 
-# --- 1. 引入配置与策略工厂 ---
+# 引入调度器 (需要 pip install apscheduler)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+# 引入原有模块
 from config import load_config
-# [修正] 这里原来写成了 get_strategy_instance，应该是 create_strategy_instance
 from quant_core.strategies import create_strategy_instance
-
-# --- 2. 引入业务模块 ---
 from quant_core.live.trader import LiveTrader
 from quant_core.live.data_bridge import LiveDataBridge
 from quant_core.utils.logger import setup_logger
 from quant_core.utils.notifier import Notifier
 
 # ==============================================================================
-# 全局配置与常量
+# 全局配置与状态
 # ==============================================================================
 CONF = load_config(mode='live')
-logger = setup_logger(name='live_strategy')
+logger = setup_logger(name='live_daemon')
 notifier = Notifier(config_path='config/secrets.yaml')
 
-# [新增] 状态文件路径 (用于与 app.py 通信)
+# 数据路径
 DATA_DIR = 'data/live'
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 STATE_FILE = os.path.join(DATA_DIR, 'dashboard_state.json')
 COMMAND_FILE = os.path.join(DATA_DIR, 'command.json')
 
+# 全局变量
+trader = None
+scheduler = None
+
 # ==============================================================================
-# 辅助函数 (Helpers)
+# 1. 核心任务逻辑 (Tasks)
 # ==============================================================================
 
-def save_dashboard_state(state_data):
+async def job_trading_session():
     """
-    [新增] 将当前运行状态写入 JSON 文件，供前端监控
+    【交易任务】每天美东时间 09:30 触发
+    负责：连接检查 -> 数据拉取 -> 策略计算 -> 下单 -> 推送通知
     """
+    logger.info("⏰ [Scheduler] 触发每日定时交易任务...")
+    notifier.send("实盘启动", "正在执行每日定投策略逻辑...")
+    
     try:
-        # 补充时间戳
-        state_data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # 写入临时文件再重命名，防止读写冲突 (Atomic Write)
-        temp_file = STATE_FILE + '.tmp'
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(state_data, f, ensure_ascii=False, indent=2)
-        os.replace(temp_file, STATE_FILE)
-    except Exception as e:
-        logger.error(f"无法写入状态文件: {e}")
+        # 1. 确保连接健康
+        if not trader or not trader.connector.ib.isConnected():
+            logger.warning("⚠️ IB 未连接，尝试重连...")
+            # 尝试重新连接 (ib_insync 的 connect 是同步的，这里在 async 环境下需要小心)
+            # 简单起见，我们假设 daemon 启动时已经连好了，这里只做简单的检查
+            # 如果断开了，通常会在心跳任务里尝试重连
+            return
 
-def check_remote_commands(trader):
-    """
-    [新增] 检查是否有来自前端的控制指令
-    """
-    if not os.path.exists(COMMAND_FILE):
-        return
-
-    try:
-        with open(COMMAND_FILE, 'r') as f:
-            cmd = json.load(f)
-        
-        # 执行完立即删除指令文件，防止重复执行
-        os.remove(COMMAND_FILE)
-        
-        action = cmd.get('action')
-        logger.warning(f"⚠️ 收到远程指令: {action}")
-
-        if action == 'STOP':
-            logger.warning("🛑 执行紧急停止！")
-            sys.exit(0) # 退出脚本
-            
-        elif action == 'FLAT_ALL':
-            logger.warning("📉 执行一键清仓！")
-            # 这里调用 trader 的清仓逻辑 (需在 trader.py 实现 close_all_positions)
-            # 暂时示例：
-            # trader.close_all_positions()
-            notifier.send("实盘告警", "已执行远程一键清仓指令！")
-
-        # [新增] 处理撤单指令
-        elif action == 'CANCEL_ALL':
-            logger.warning("🚫 执行全部撤单！")
-            trader.cancel_all_orders() # 调用刚才加的方法
-            notifier.send("实盘操作", "已执行全部撤单指令。")
-            
-    except Exception as e:
-        logger.error(f"处理指令失败: {e}")
-
-def weight_to_quantity(target_weights: dict, current_prices: pd.Series, total_equity: float) -> tuple:
-    """
-    [核心逻辑] 将 目标权重(%) 转换为 目标股数(Share)
-    """
-    target_qtys = {}
-    log_details = [] 
-    
-    for code, weight in target_weights.items():
-        if weight == 0:
-            target_qtys[code] = 0
-            continue
-            
-        price = current_prices.get(code)
-        if not price or pd.isna(price) or price <= 0:
-            continue
-            
-        target_value = total_equity * weight
-        qty = math.floor(target_value / price)
-        target_qtys[code] = int(qty)
-        
-        info_str = f"{code}: {weight:.1%} | ${price:.2f} -> {qty} shares"
-        log_details.append(info_str)
-        
-    return target_qtys, "\n".join(log_details)
-
-def build_portfolio_state(connector):
-    """
-    对接 IB 获取当前账户实时净值与持仓
-    """
-    if not connector.ib.isConnected():
-        return {'total_equity': 0, 'positions': {}, 'avg_costs': {}, 'pnl': 0}
-
-    # 获取账户摘要
-    summary = connector.ib.accountSummary()
-    # NetLiquidation: 总资产, UnrealizedPnL: 未实现盈亏
-    total_equity = float(next((x.value for x in summary if x.tag == 'NetLiquidation'), 0))
-    unrealized_pnl = float(next((x.value for x in summary if x.tag == 'UnrealizedPnL'), 0))
-    
-    # 获取持仓详情
-    ib_positions = connector.ib.positions()
-    positions = {}
-    avg_costs = {}
-    
-    for p in ib_positions:
-        symbol = p.contract.localSymbol 
-        positions[symbol] = p.position
-        avg_costs[symbol] = p.avgCost
-        
-    return {
-        'total_equity': total_equity,
-        'unrealized_pnl': unrealized_pnl,
-        'positions': positions,
-        'avg_costs': avg_costs
-    }
-
-# ==============================================================================
-# 主程序逻辑
-# ==============================================================================
-
-def main():
-    start_time = datetime.now()
-    logger.info(f"🚀 启动实盘引擎 (Dashboard Mode) [策略: {CONF['strategy']['type']}]")
-    
-    # 初始化状态
-    dashboard_data = {
-        "status": "Starting",
-        "strategy": CONF['strategy']['type'],
-        "logs": [],
-        "account": {}
-    }
-    save_dashboard_state(dashboard_data)
-
-    trader = None
-    try:
-        # --- Step 1: 建立连接 ---
-        trader = LiveTrader()
-        trader.connector.port = CONF['ib_connection'].get('port', 7497)
-        trader.start()
-        
-        time.sleep(2)
-        if not trader.connector.ib.isConnected():
-            raise ConnectionError("无法连接到 IB，请检查 TWS。")
-
-        dashboard_data["status"] = "Connected"
-        save_dashboard_state(dashboard_data)
-
-        # --- Step 2: 策略执行 (Trading Phase) ---
-        logger.info("🧠 开始执行策略逻辑...")
-        
-        # [修正] 实例化策略：使用 correct_strategy_instance
+        # 2. 策略实例化
         strategy = create_strategy_instance(CONF['strategy'])
         bridge = LiveDataBridge(trader.connector, CONF['universe_path'])
         
-        # 准备数据
+        # 3. 数据准备 (Data Pulling)
+        logger.info("📡 正在拉取 IB 历史数据...")
         required_factors = strategy.get_required_factors()
+        
+        # 注意：bridge.prepare_data_for_strategy 内部是同步阻塞的
+        # 在高并发场景下应该放到 executor 里跑，但对于单策略实盘，直接跑也无妨
         factor_df, current_prices = bridge.prepare_data_for_strategy(
             required_factors, lookback_window=365
         )
 
-        if not factor_df.empty:
-            # 格式化数据
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            factor_df.index.name = 'sec_code'
-            factor_df = factor_df.reset_index()
-            factor_df['date'] = today_str
-            factor_df = factor_df.set_index(['date', 'sec_code'])
-            
-            strategy.load_data(factor_df)
-            
-            # 获取状态
-            portfolio_state = build_portfolio_state(trader.connector)
-            dashboard_data["account"] = portfolio_state
-            save_dashboard_state(dashboard_data)
+        if factor_df.empty:
+            logger.error("❌ 数据获取为空，跳过本次交易")
+            notifier.send("交易失败", "获取行情数据为空，策略未执行。")
+            return
 
-            # 计算信号
-            universe_codes = factor_df.index.get_level_values('sec_code').unique().tolist()
-            target_weights = strategy.on_bar(
-                date=today_str,
-                universe_codes=universe_codes,
-                portfolio_state=portfolio_state,
-                current_prices=pd.Series(current_prices)
-            )
-
-            # 执行交易
-            if target_weights or portfolio_state['positions']:
-                clean_prices = {k.split('.')[0]: v for k, v in current_prices.items()}
-                clean_target_weights = {k.split('.')[0]: v for k, v in target_weights.items()}
-                
-                target_qtys, details = weight_to_quantity(clean_target_weights, clean_prices, portfolio_state['total_equity'])
-                
-                logger.info(f"发送调仓指令...")
-                trader.execute_rebalance(target_qtys)
-                
-                # 发送报告
-                notifier.send(f"实盘执行报告 {today_str}", f"调仓已完成。\n{details}")
-            else:
-                logger.info("无信号或空仓，跳过交易。")
-
-        # --- Step 3: 进入监控保活模式 (Monitoring Loop) ---
-        # 这是一个死循环，保持脚本运行，以便 app.py 可以实时看到 PnL 变化
-        logger.info("👁️ 交易逻辑结束，进入实时监控模式 (按 Ctrl+C 退出)...")
-        dashboard_data["status"] = "Monitoring"
+        # 4. 格式化数据并加载
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        factor_df.index.name = 'sec_code'
+        factor_df = factor_df.reset_index()
+        factor_df['date'] = today_str
+        factor_df = factor_df.set_index(['date', 'sec_code'])
         
-        # 记录最近的日志用于前端显示 (简单实现，实际可用 deque)
-        recent_logs = ["System Initialized", "Trading Logic Completed", "Entering Monitor Mode"]
+        strategy.load_data(factor_df)
+        
+        # 5. 获取账户状态
+        state = build_portfolio_state(trader.connector)
+        
+        # 6. 运行策略计算 (Core Logic)
+        logger.info("🧠 正在计算策略信号...")
+        universe_codes = factor_df.index.get_level_values('sec_code').unique().tolist()
+        target_weights = strategy.on_bar(
+            date=today_str,
+            universe_codes=universe_codes,
+            portfolio_state=state,
+            current_prices=pd.Series(current_prices)
+        )
 
-        while True:
-            # 1. 检查前端指令 (Stop/Flat)
-            check_remote_commands(trader)
+        # 7. 执行交易 (Execution)
+        if target_weights or state['positions']:
+            clean_prices = {k.split('.')[0]: v for k, v in current_prices.items()}
+            clean_weights = {k.split('.')[0]: v for k, v in target_weights.items()}
             
-            # 2. 更新账户状态 (心跳)
-            if trader.connector.ib.isConnected():
-                current_state = build_portfolio_state(trader.connector)
-                dashboard_data["account"] = current_state
-                dashboard_data["last_update"] = datetime.now().strftime('%H:%M:%S')
-                
-                # 更新日志 (模拟)
-                dashboard_data["logs"] = recent_logs[-10:] 
-                
-                save_dashboard_state(dashboard_data)
+            target_qtys, details = weight_to_quantity(clean_weights, clean_prices, state['total_equity'])
+            
+            if target_qtys:
+                logger.info(f"🔄 执行调仓: {target_qtys}")
+                # execute_rebalance 是同步的
+                trader.execute_rebalance(target_qtys)
+                notifier.send("交易完成", f"已发送订单至 TWS。\n{details}")
             else:
-                logger.warning("IB 连接断开，尝试重连...")
-                dashboard_data["status"] = "Disconnected"
-                save_dashboard_state(dashboard_data)
-                try:
-                    trader.start()
-                except:
-                    pass
+                logger.info("⚖️ 计算后持仓无变动。")
+                notifier.send("交易跳过", "策略计算结果无持仓变动。")
+        else:
+            logger.info("💤 空仓且无信号。")
 
-            # 3. 频率控制 (每 3 秒刷新一次)
-            time.sleep(3)
-
-    except KeyboardInterrupt:
-        logger.info("用户手动停止脚本。")
     except Exception as e:
-        logger.error(f"❌ 异常退出: {e}")
-        dashboard_data["status"] = "Error"
-        dashboard_data["error"] = str(e)
-        save_dashboard_state(dashboard_data)
-        notifier.send("实盘崩溃", traceback.format_exc())
-    finally:
-        if trader:
-            trader.stop()
-        logger.info("脚本已结束。")
+        err_msg = traceback.format_exc()
+        logger.error(f"❌ 交易任务异常: {e}\n{err_msg}")
+        notifier.send("交易任务崩溃", f"请检查服务器日志。\n错误: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+async def job_heartbeat():
+    """
+    【心跳任务】每 5 秒运行一次
+    负责：处理前端指令 -> 更新状态文件 -> 维持连接
+    """
+    # 1. 处理前端指令 (STOP/FLAT/CANCEL)
+    check_remote_commands(trader)
+    
+    # 2. 更新状态文件 (Dashboard State)
+    if trader and trader.connector.ib.isConnected():
+        state = build_portfolio_state(trader.connector)
+        
+        # 增加一些调度器信息给前端看
+        state['status'] = "Running (Auto)"
+        try:
+            next_run = scheduler.get_job('daily_trading').next_run_time
+            state['next_run'] = str(next_run)
+        except:
+            state['next_run'] = "Not Scheduled"
+            
+        save_dashboard_state(state)
+    else:
+        # 如果断连，记录状态
+        save_dashboard_state({'status': 'Disconnected', 'error': 'IB connection lost'})
+        # (可选) 这里可以加重连逻辑，但 ib_insync 通常会自动重连
+
+# ==============================================================================
+# 2. 辅助函数 (Helpers) - 直接复用
+# ==============================================================================
+
+def save_dashboard_state(state_data):
+    try:
+        state_data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        temp_file = STATE_FILE + '.tmp'
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(state_data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_file, STATE_FILE)
+    except Exception: pass
+
+def check_remote_commands(trader_instance):
+    if not os.path.exists(COMMAND_FILE): return
+    try:
+        with open(COMMAND_FILE, 'r') as f: cmd = json.load(f)
+        os.remove(COMMAND_FILE)
+        
+        action = cmd.get('action')
+        logger.warning(f"⚠️ 收到远程指令: {action}")
+        notifier.send("收到指令", f"正在执行: {action}")
+        
+        if action == 'STOP':
+            logger.warning("🛑 停止指令已接收，退出进程。")
+            sys.exit(0)
+        elif action == 'CANCEL_ALL':
+            trader_instance.cancel_all_orders()
+        elif action == 'FLAT_ALL':
+            # 需在 trader 中实现 close_all
+            notifier.send("警告", "一键清仓功能暂未实装，请手动平仓。")
+            
+    except Exception as e: logger.error(f"指令处理失败: {e}")
+
+def weight_to_quantity(weights, prices, equity):
+    qtys = {}
+    logs = []
+    for code, w in weights.items():
+        if w == 0: 
+            qtys[code] = 0
+            continue
+        p = prices.get(code)
+        if not p or p <= 0: continue
+        qtys[code] = int(math.floor(equity * w / p))
+        logs.append(f"{code}: {w:.1%} -> {qtys[code]} shares")
+    return qtys, "\n".join(logs)
+
+def build_portfolio_state(connector):
+    if not connector.ib.isConnected(): return {'total_equity':0, 'positions':{}}
+    summary = connector.ib.accountSummary()
+    total_equity = float(next((x.value for x in summary if x.tag == 'NetLiquidation'), 0))
+    pnl = float(next((x.value for x in summary if x.tag == 'UnrealizedPnL'), 0))
+    positions = {p.contract.localSymbol: p.position for p in connector.ib.positions()}
+    costs = {p.contract.localSymbol: p.avgCost for p in connector.ib.positions()}
+    return {'total_equity': total_equity, 'unrealized_pnl': pnl, 'positions': positions, 'avg_costs': costs}
+
+# ==============================================================================
+# 3. 异步启动入口 (Main Entry)
+# ==============================================================================
+
+async def main_loop():
+    global trader, scheduler
+    
+    # --- 1. 初始化交易连接 ---
+    trader = LiveTrader()
+    port = CONF['ib_connection'].get('port', 7497) 
+    trader.connector.port = port
+    
+    logger.info(f"🚀 正在连接 IB Gateway (Port: {port})...")
+    
+    # 这里的 start() 内部是同步连接，会阻塞一下
+    trader.start() 
+    
+    # 等待连接稳定
+    for _ in range(5):
+        if trader.connector.ib.isConnected(): break
+        await asyncio.sleep(1)
+    
+    if not trader.connector.ib.isConnected():
+        logger.error("❌ 无法连接 IB，请检查 TWS 是否开启。")
+        return
+
+    logger.info("✅ IB 连接成功，系统已就绪。")
+    notifier.send("守护进程启动", f"实盘系统已上线 (PID: {os.getpid()})")
+
+    # --- 2. 初始化调度器 (Scheduler) ---
+    # 强制使用美东时区，无论服务器在哪
+    ny_tz = timezone('America/New_York')
+    scheduler = AsyncIOScheduler(timezone=ny_tz)
+    
+    # [任务 A] 交易任务：周一至周五，09:30 AM (美东时间)
+    scheduler.add_job(
+        job_trading_session, 
+        CronTrigger(day_of_week='mon-fri', hour=9, minute=30, timezone=ny_tz),
+        id='daily_trading'
+    )
+    
+    # [任务 B] 心跳任务：每 5 秒一次
+    scheduler.add_job(job_heartbeat, 'interval', seconds=5, id='heartbeat')
+    
+    # 启动调度
+    scheduler.start()
+    
+    # 打印下次运行时间，方便核对
+    try:
+        next_run = scheduler.get_job('daily_trading').next_run_time
+        logger.info(f"📅 下次交易时间: {next_run} (Timezone: America/New_York)")
+        logger.info("👁️ 进入后台监控模式 (按 Ctrl+C 退出)...")
+    except Exception as e:
+        logger.warning(f"无法获取下次运行时间: {e}")
+
+    # --- 3. 永久阻塞主线程 (Event Loop) ---
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("👋 进程正在停止...")
+        trader.stop()
+        notifier.send("守护进程停止", "用户手动停止了系统。")
+
+if __name__ == '__main__':
+    try:
+        # 运行异步主循环
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        pass
