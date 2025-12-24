@@ -1,4 +1,3 @@
-# quant_core/portfolio.py
 # -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
@@ -8,256 +7,245 @@ from typing import Dict, List, Optional, Tuple
 class Portfolio:
     """
     负责管理投资组合的状态、现金和执行交易。
-    已增强：支持交易成本追踪 + 持仓成本(Avg Cost)计算 + 【新增】交易日志记录
+    工业级增强 V5: 
+    1. 显式区分 Signal Price (用于定股数) vs Execution Price (用于结算)。
+    2. 增加 2% Cash Buffer 防止跳空透支。
+    3. 资金不足时自动缩减买单 (Order Truncation)。
     """
-    def __init__(self, open_prices: pd.DataFrame, close_prices: pd.DataFrame, initial_capital: float, commission_rate: float, slippage: float):
-        if not isinstance(open_prices.index, pd.DatetimeIndex) or not isinstance(close_prices.index, pd.DatetimeIndex):
-            raise ValueError("价格数据的索引必须是 DatetimeIndex。")
-
-        self.open_prices = open_prices
-        self.close_prices = close_prices
+    def __init__(self, initial_capital: float, commission_rate: float, slippage: float):
+        # [修改] 不再需要在 init 里传全量价格数据，由 Engine 逐日传入，解耦更彻底
         self.initial_capital = initial_capital
         self.commission_rate = commission_rate
         self.slippage = slippage
 
         self.cash = initial_capital
+        
         # {sec_code: shares} 持有股数
         self.current_positions: Dict[str, float] = defaultdict(float)
         
         # 追踪平均持仓成本 {sec_code: avg_cost_per_share}
         self.avg_costs: Dict[str, float] = defaultdict(float)
         
-        # 记录每日总净值
+        # 历史记录容器
         self.portfolio_history: List[Dict] = [] 
-        # 记录调仓后的持仓详情
         self.holdings_history: List[Dict] = [] 
-        # 记录换手率
         self.turnover_history: List[float] = [] 
-
-        # --- 【核心新增 1】交易记录列表 ---
         self.trade_records: List[Dict] = []
 
         # 归因分析变量
         self.total_commission_paid = 0.0  
         self.total_slippage_paid = 0.0    
 
-        # 记录第一天的初始状态
-        if not self.open_prices.empty:
-            self.portfolio_history.append({'datetime': self.open_prices.index[0], 'total_value': initial_capital})
+        # 记录初始状态 (时间设为 NaT，等待第一次 update 更新)
+        self.portfolio_history.append({'datetime': pd.NaT, 'total_value': initial_capital})
 
-    def get_current_value(self, date: pd.Timestamp) -> float:
-        """获取指定日期收盘后的总资产 (持仓市值 + 现金)"""
+    def get_current_equity(self, current_prices: pd.Series) -> float:
+        """
+        根据提供的最新价格计算总权益 (Mark-to-Market)
+        """
         market_value = 0.0
-        if date in self.close_prices.index:
-            prices_today = self.close_prices.loc[date]
-            for sec, shares in self.current_positions.items():
-                if sec in prices_today.index:
-                    p = prices_today[sec]
-                    if pd.notna(p) and p > 0:
-                        market_value += shares * p
+        for sec, shares in self.current_positions.items():
+            if shares != 0:
+                price = current_prices.get(sec, np.nan)
+                if pd.notna(price) and price > 0:
+                    market_value += shares * price
         return market_value + self.cash
 
-    def update_portfolio_value(self, date: pd.Timestamp):
-        """记录当天的投资组合总价值到历史记录"""
+    def update_portfolio_value(self, date: pd.Timestamp, current_prices: pd.Series):
+        """每日更新净值"""
+        # 如果当天有重复记录先移除（防止同一天多次调用）
         if self.portfolio_history and self.portfolio_history[-1]['datetime'] == date:
             self.portfolio_history.pop()
 
-        total_value = self.get_current_value(date)
+        total_value = self.get_current_equity(current_prices)
         self.portfolio_history.append({'datetime': date, 'total_value': total_value})
         return total_value
 
     def get_portfolio_state(self):
         """获取当前账户快照，供策略层风控使用"""
+        last_val = self.portfolio_history[-1]['total_value'] if self.portfolio_history else self.initial_capital
         return {
-            'total_equity': self.portfolio_history[-1]['total_value'] if self.portfolio_history else self.initial_capital,
+            'total_equity': last_val,
             'cash': self.cash,
             'positions': self.current_positions.copy(),
-            'avg_costs': self.avg_costs.copy() # 传给策略比较止损
+            'avg_costs': self.avg_costs.copy()
         }
 
-    def rebalance(self, decision_date: pd.Timestamp, trade_date: pd.Timestamp, target_weights: Dict[str, float]):
-        """根据目标权重执行调仓"""
-        portfolio_value_before_trade = self.get_current_value(decision_date)
-
-        if portfolio_value_before_trade <= 1e-8 or trade_date not in self.open_prices.index:
+    def rebalance(self, 
+                  date: pd.Timestamp, 
+                  target_weights: Dict[str, float], 
+                  signal_prices: pd.Series, 
+                  execution_prices: pd.Series):
+        """
+        [工业级调仓逻辑]
+        
+        Args:
+            date: 交易日期
+            target_weights: 策略输出的目标权重
+            signal_prices: 信号价格 (T-1 收盘价)，用于计算【目标股数】
+            execution_prices: 执行价格 (T 开盘价)，用于计算【实际成交金额】
+        """
+        # 1. 基于 Signal Price 估算当前的参考总资产
+        #    (这一步模拟：在昨晚收盘后，我以为我有多少钱)
+        estimated_equity = self.get_current_equity(signal_prices)
+        
+        # 资产太少不交易
+        if estimated_equity <= 1e-6: 
             self.turnover_history.append(0.0)
-            self._record_holdings(trade_date)
+            self._record_holdings(date, execution_prices)
             return
 
-        prices_today = self.open_prices.loc[trade_date]
+        # =========================================================
+        # [修改点 1] 现金缓冲 (Cash Buffer)
+        # 预留 2% 现金，只分配 98% 的资金去买股票，防止次日跳空导致透支
+        # =========================================================
+        SAFE_BUFFER = 0.02
+        available_equity = estimated_equity * (1.0 - SAFE_BUFFER)
 
-        # 1. 计算目标持有股数
+        # 2. 计算目标持有股数 (Target Shares)
+        #    公式: (可用权益 * 目标权重) / 昨收价
         target_positions: Dict[str, float] = {}
         for sec, weight in target_weights.items():
-            if weight > 1e-9:
-                target_value = portfolio_value_before_trade * weight
-                price = prices_today.get(sec, np.nan)
-                if pd.notna(price) and price > 0:
-                    cost_per_share = price * (1 + self.commission_rate + self.slippage)
-                    target_shares = target_value / cost_per_share if cost_per_share > 0 else 0
-                    if target_shares > 0:
-                        target_positions[sec] = target_shares
+            if weight > 1e-6:
+                ref_price = signal_prices.get(sec, np.nan)
+                if pd.notna(ref_price) and ref_price > 0:
+                    target_value = available_equity * weight
+                    # 向下取整，模拟实盘只能买整数股 (这里保留浮点模拟部分成交)
+                    target_shares = target_value / ref_price 
+                    target_positions[sec] = target_shares
 
-        # 2. 生成交易列表
+        # 3. 生成订单差额 (Diff)
         trades: Dict[str, float] = defaultdict(float)
-        # 现有持仓变动
-        for sec, current_shares in self.current_positions.items():
-            target_shares = target_positions.get(sec, 0.0)
-            diff = target_shares - current_shares
-            if abs(diff) > 1e-6: # 忽略微小浮点误差
-                trades[sec] = diff
+        all_secs = set(self.current_positions.keys()) | set(target_positions.keys())
         
-        # 新开仓
-        for sec, target_shares in target_positions.items():
-            if sec not in self.current_positions:
-                trades[sec] = target_shares
+        for sec in all_secs:
+            tgt = target_positions.get(sec, 0.0)
+            curr = self.current_positions.get(sec, 0.0)
+            diff = tgt - curr
+            if abs(diff) > 1e-6:
+                trades[sec] = diff
 
-        # 3. 执行交易 (先卖后买，释放资金)
-        total_sells_nominal_value = 0.0
-        total_buys_nominal_value = 0.0
-
-        # 卖出逻辑
-        sell_trades = {sec: s for sec, s in trades.items() if s < -1e-9}
-        for sec, shares_to_sell in sell_trades.items():
-            # 目标持仓量 = 当前 + 变动(负数)
-            target_shares_after_sell = self.current_positions[sec] + shares_to_sell
-            if target_shares_after_sell < 0: target_shares_after_sell = 0
+        # 4. 执行交易
+        #    原则：先卖后买，释放资金
+        total_sells_nominal = 0.0
+        total_buys_nominal = 0.0
+        
+        # --- A. 卖出流程 ---
+        sell_orders = {k: v for k, v in trades.items() if v < -1e-6}
+        for sec, shares_delta in sell_orders.items():
+            exec_price = execution_prices.get(sec, np.nan)
+            # 停牌或价格异常无法卖出
+            if pd.isna(exec_price) or exec_price <= 0: continue 
             
-            sell_nominal, _ = self._execute_trade(trade_date, sec, target_shares_after_sell)
-            total_sells_nominal_value += sell_nominal
+            # 卖出金额 = 股数 * 价格 * (1 - 费率)
+            revenue, nominal = self._execute_trade(date, sec, shares_delta, exec_price, 'sell')
+            total_sells_nominal += nominal
 
-        # 买入逻辑
-        buy_trades = {sec: s for sec, s in trades.items() if s > 1e-9}
-        for sec, shares_to_buy in buy_trades.items():
-            target_shares_after_buy = self.current_positions.get(sec, 0.0) + shares_to_buy
-            buy_nominal, _ = self._execute_trade(trade_date, sec, target_shares_after_buy)
-            total_buys_nominal_value += buy_nominal
+        # --- B. 买入流程 (含 Gap Risk 处理) ---
+        buy_orders = {k: v for k, v in trades.items() if v > 1e-6}
+        
+        for sec, shares_delta in buy_orders.items():
+            exec_price = execution_prices.get(sec, np.nan)
+            if pd.isna(exec_price) or exec_price <= 0: continue # 停牌无法买入
 
-        # 4. 记录换手率
-        turnover = min(total_buys_nominal_value, total_sells_nominal_value) / portfolio_value_before_trade if portfolio_value_before_trade > 1e-8 else 0.0
+            # 估算需要多少钱
+            cost_per_share = exec_price * (1 + self.commission_rate + self.slippage)
+            estimated_cost = shares_delta * cost_per_share
+            
+            # =========================================================
+            # [修改点 2] 资金硬约束检查 (Hard Cash Constraint)
+            # 处理跳空高开导致的资金不足：如果钱不够，自动减少购买股数
+            # =========================================================
+            actual_delta = shares_delta
+            if estimated_cost > self.cash:
+                # 钱不够了！重新计算最大能买多少股
+                # 留 0.1% 的极小余量防止精度误差
+                max_shares = self.cash / cost_per_share * 0.999 
+                if max_shares < 1e-6: 
+                    continue # 连一股都买不起，跳过
+                actual_delta = max_shares # 缩减订单
+            
+            cost, nominal = self._execute_trade(date, sec, actual_delta, exec_price, 'buy')
+            total_buys_nominal += nominal
+
+        # 5. 记录换手率
+        turnover = 0.0
+        if estimated_equity > 0:
+            turnover = min(total_buys_nominal, total_sells_nominal) / estimated_equity
         self.turnover_history.append(turnover)
 
-        self._record_holdings(trade_date)
+        # 6. 记录持仓快照 (用于归因)
+        self._record_holdings(date, execution_prices)
 
-    def _execute_trade(self, date: pd.Timestamp, sec_code: str, target_shares: float) -> Tuple[float, Optional[str]]:
-        """
-        执行单笔交易并记录佣金与滑点。
-        更新平均持仓成本 (Avg Cost)。
-        【新增】记录交易日志到 self.trade_records。
-        """
-        price = self.open_prices.loc[date, sec_code] if date in self.open_prices.index and sec_code in self.open_prices.columns else np.nan
 
-        if pd.isna(price) or price <= 0:
-            return 0.0, None
+    def _execute_trade(self, date, sec, shares_delta, price, side):
+        """执行单笔交易，更新现金和持仓"""
+        nominal_value = abs(shares_delta) * price
+        commission = nominal_value * self.commission_rate
+        slippage = nominal_value * self.slippage
+        total_cost = nominal_value + commission + slippage if side == 'buy' else 0
+        net_proceeds = nominal_value - commission - slippage if side == 'sell' else 0
 
-        current_shares = self.current_positions.get(sec_code, 0.0)
-        shares_to_trade = target_shares - current_shares
-
-        if abs(shares_to_trade * price) < 1.0:
-             return 0.0, None
-
-        trade_nominal_value = abs(shares_to_trade * price)
-        trade_type = 'buy' if shares_to_trade > 0 else 'sell'
-
-        comm_cost = trade_nominal_value * self.commission_rate
-        slip_cost = trade_nominal_value * self.slippage
-
-        actual_shares_traded = 0.0 # 实际成交股数
-
-        if trade_type == 'buy':
-            # 买入：实际支出
-            total_required = trade_nominal_value + comm_cost + slip_cost
+        if side == 'buy':
+            self.cash -= total_cost
+            self.total_commission_paid += commission
+            self.total_slippage_paid += slippage
             
-            # 确定实际能买多少
-            actual_buy_shares = shares_to_trade
-            if self.cash < total_required:
-                cost_per_share = price * (1 + self.commission_rate + self.slippage)
-                actual_buy_shares = self.cash / cost_per_share if cost_per_share > 0 else 0
-                trade_nominal_value = actual_buy_shares * price # 更新名义价值
-                total_required = self.cash # 用光现金
-
-            if actual_buy_shares * price < 1.0: # 金额太小不交易
-                return 0.0, None
-
-            # 计算加权平均成本
-            old_cost_basis = current_shares * self.avg_costs[sec_code]
-            new_cost_basis = trade_nominal_value + comm_cost + slip_cost 
-            new_total_shares = current_shares + actual_buy_shares
+            # 更新平均成本 (加权平均)
+            curr_shares = self.current_positions[sec]
+            if curr_shares + shares_delta > 0:
+                old_cost = curr_shares * self.avg_costs[sec]
+                new_cost = nominal_value + commission + slippage
+                self.avg_costs[sec] = (old_cost + new_cost) / (curr_shares + shares_delta)
             
-            if new_total_shares > 0:
-                self.avg_costs[sec_code] = (old_cost_basis + new_cost_basis) / new_total_shares
+            self.current_positions[sec] += shares_delta
 
-            # 更新资金和持仓
-            self.cash -= total_required
-            self.current_positions[sec_code] = new_total_shares
+        elif side == 'sell':
+            self.cash += net_proceeds
+            self.total_commission_paid += commission
+            self.total_slippage_paid += slippage
+            self.current_positions[sec] += shares_delta # shares_delta is negative
             
-            # 记录归因
-            self.total_commission_paid += trade_nominal_value * self.commission_rate
-            self.total_slippage_paid += trade_nominal_value * self.slippage
-            
-            actual_shares_traded = actual_buy_shares
+            # 清理微小碎股
+            if self.current_positions[sec] <= 1e-6:
+                del self.current_positions[sec]
+                if sec in self.avg_costs: del self.avg_costs[sec]
 
-        elif trade_type == 'sell':
-            # 卖出
-            actual_shares_to_sell = min(abs(shares_to_trade), current_shares)
-            real_nominal = actual_shares_to_sell * price
-            
-            proceeds = real_nominal - (real_nominal * self.commission_rate) - (real_nominal * self.slippage)
-            self.cash += proceeds
-            self.current_positions[sec_code] = current_shares - actual_shares_to_sell
-            
-            # 记录归因
-            self.total_commission_paid += real_nominal * self.commission_rate
-            self.total_slippage_paid += real_nominal * self.slippage
-            trade_nominal_value = real_nominal
-            
-            actual_shares_traded = actual_shares_to_sell
+        # 记录日志
+        self.trade_records.append({
+            'datetime': date,
+            'sec_code': sec,
+            'action': side,
+            'price': price,
+            'shares': abs(shares_delta),
+            'value': nominal_value,
+            'commission': commission,
+            'slippage': slippage
+        })
+        
+        # 返回 (实际现金变动, 名义价值)
+        return (net_proceeds if side == 'sell' else total_cost), nominal_value
 
-            # 卖出不影响单位成本，只在清仓时移除
-            if self.current_positions[sec_code] < 1e-6:
-                del self.current_positions[sec_code]
-                del self.avg_costs[sec_code] # 清仓，移除成本记录
+    def _record_holdings(self, date, current_prices):
+        """记录每日持仓比例"""
+        equity = self.get_current_equity(current_prices)
+        if equity <= 0: return
 
-        # --- 【核心新增 2】记录交易日志 ---
-        if actual_shares_traded > 0:
-            self.trade_records.append({
-                'datetime': date,
-                'sec_code': sec_code,
-                'action': trade_type,
-                'price': price,
-                'shares': actual_shares_traded,
-                'value': trade_nominal_value,
-                'commission': trade_nominal_value * self.commission_rate,
-                'slippage': trade_nominal_value * self.slippage
-            })
-
-        return trade_nominal_value, trade_type
-
-    def _record_holdings(self, date: pd.Timestamp):
-        """记录持仓详情"""
-        current_portfolio_value = self.get_current_value(date)
-        if current_portfolio_value <= 1e-8:
-             return
-
-        cash_weight = self.cash / current_portfolio_value
+        # 记录现金
         self.holdings_history.append({
             'datetime': date, 'sec_code': 'CASH', 'shares': self.cash,
-            'price': 1.0, 'value': self.cash, 'weight': cash_weight
+            'price': 1.0, 'value': self.cash, 'weight': self.cash/equity
         })
+        # 记录股票
+        for sec, shares in self.current_positions.items():
+            price = current_prices.get(sec, 0)
+            val = shares * price
+            self.holdings_history.append({
+                'datetime': date, 'sec_code': sec, 'shares': shares,
+                'price': price, 'value': val, 'weight': val/equity
+            })
 
-        if date in self.close_prices.index:
-            prices_today = self.close_prices.loc[date]
-            for sec, shares in self.current_positions.items():
-                if shares > 1e-6:
-                    price = prices_today.get(sec, 0.0)
-                    holding_value = shares * price
-                    weight = holding_value / current_portfolio_value
-                    self.holdings_history.append({
-                        'datetime': date, 'sec_code': sec, 'shares': shares,
-                        'price': price, 'value': holding_value, 'weight': weight
-                    })
-
-    # --- 【核心新增 3】获取交易日志接口 ---
+    # Getters
     def get_trade_log(self) -> pd.DataFrame:
         if not self.trade_records:
             return pd.DataFrame(columns=['datetime', 'sec_code', 'action', 'price', 'shares', 'value', 'commission', 'slippage'])
