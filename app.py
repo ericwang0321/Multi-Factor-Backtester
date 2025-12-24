@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import yaml
 import io
+import os
+import json
 from datetime import datetime
 import sys
 import subprocess
@@ -14,23 +16,37 @@ from quant_core.backtest_engine import BacktestEngine
 from quant_core.performance import calculate_extended_metrics
 from quant_core.factors.engine import FactorEngine
 from quant_core.analysis.task_runner import FactorTaskRunner
+# [新增] 引入实盘需要的工厂
+from quant_core.strategies import create_strategy_instance
+
+# [核心修复] 引入项目的配置加载器 (支持 base+backtest 合并)
+from config import load_config as _project_load_config
 
 # --- 引入可视化模块 ---
 from quant_core.visualization.market import MarketCharts
 from quant_core.visualization.factor import FactorCharts
 from quant_core.visualization.performance import PerformanceCharts
-from quant_core.visualization.trading import TradingCharts     # 交易视图
-from quant_core.visualization.reporting import ReportGenerator # 报告生成器
+from quant_core.visualization.trading import TradingCharts     
+from quant_core.visualization.reporting import ReportGenerator 
 
 # --- Page Setup ---
-st.set_page_config(page_title="Multi-Factor Backtest App", layout="wide")
+st.set_page_config(page_title="Quant Cockpit & Backtester", layout="wide", page_icon="📈")
+
+# --- Constants for Live Dashboard ---
+LIVE_DATA_DIR = 'data/live'
+STATE_FILE = os.path.join(LIVE_DATA_DIR, 'dashboard_state.json')
+COMMAND_FILE = os.path.join(LIVE_DATA_DIR, 'command.json')
+LOG_FILE = 'logs/live_strategy.log'
 
 # --- Resource Caching ---
-@st.cache_resource
-def load_config(config_path):
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
+
+# [核心修复] 替换旧的 load_config，改用 Config 模块加载
+@st.cache_data
+def get_cached_config(mode='backtest'):
+    """
+    使用项目统一的配置加载逻辑 (base + override)，并进行缓存
+    """
+    return _project_load_config(mode=mode)
 
 @st.cache_resource
 def get_query_helper():
@@ -44,6 +60,7 @@ def get_factor_engine(_query_helper):
 def get_analysis_runner(_query_helper):
     return FactorTaskRunner(_query_helper)
 
+# --- Helper Functions ---
 def prepare_factor_data_for_strategy(_engine, codes, factors, start_date, end_date):
     """内存计算因子数据"""
     if _engine.xarray_data is None:
@@ -68,7 +85,110 @@ def prepare_factor_data_for_strategy(_engine, codes, factors, start_date, end_da
     full_factor_df.index.names = ['datetime', 'sec_code']
     return full_factor_df
 
-# --- Module 1: Data Explorer ---
+# --- Module 1: Live Dashboard ---
+def render_live_dashboard():
+    st.title("🔴 Live Trading Cockpit")
+    
+    # 1. 状态读取逻辑
+    if not os.path.exists(STATE_FILE):
+        st.warning("Waiting for live strategy to start... (dashboard_state.json not found)")
+        st.info("💡 Hint: Run 'python run_live_strategy.py' in a separate terminal.")
+        return
+
+    try:
+        # 使用 retry 机制防止读取时的竞争冲突
+        state = {}
+        for _ in range(3):
+            try:
+                with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                break
+            except json.JSONDecodeError:
+                time.sleep(0.1)
+                continue
+    except Exception as e:
+        st.error(f"Error reading state file: {e}")
+        return
+
+    # 2. 顶部 HUD (Heads-Up Display)
+    acct = state.get('account', {})
+    status = state.get('status', 'Unknown')
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        # 状态指示灯
+        color = "green" if status in ["Connected", "Monitoring"] else "red"
+        st.markdown(f"### Status: :{color}[{status}]")
+        st.caption(f"Last Update: {state.get('updated_at', '--')}")
+
+    with col2:
+        equity = acct.get('total_equity', 0)
+        st.metric("Net Liquidation", f"${equity:,.2f}")
+
+    with col3:
+        pnl = acct.get('unrealized_pnl', 0)
+        st.metric("Unrealized PnL", f"${pnl:,.2f}", delta=f"{pnl:,.2f}")
+
+    with col4:
+        # 控制台
+        st.markdown("**Emergency Control**")
+        c_stop, c_flat, c_cancel = st.columns(3)
+        if c_stop.button("🛑 STOP", type="primary", use_container_width=True):
+            with open(COMMAND_FILE, 'w') as f:
+                json.dump({"action": "STOP"}, f)
+            st.toast("🚨 STOP Command Sent!", icon="🛑")
+            
+        if c_flat.button("📉 FLAT", type="secondary", use_container_width=True):
+            with open(COMMAND_FILE, 'w') as f:
+                json.dump({"action": "FLAT_ALL"}, f)
+            st.toast("📉 FLAT ALL Command Sent!", icon="📉")
+
+        # [NEW] Cancel Button (English Version)
+        if c_cancel.button("🚫 CANCEL", use_container_width=True, help="Cancel all open orders"):
+            with open(COMMAND_FILE, 'w') as f:
+                json.dump({"action": "CANCEL_ALL"}, f)
+            st.toast("Command Sent: Cancel All Orders")
+            
+    st.divider()
+
+    # 3. 持仓监控
+    st.subheader("Current Positions")
+    positions = acct.get('positions', {})
+    avg_costs = acct.get('avg_costs', {})
+    
+    if positions:
+        pos_data = []
+        for sym, qty in positions.items():
+            if qty != 0:
+                cost = avg_costs.get(sym, 0)
+                # 简单估算市值，更精准的需要 TWS 推送价格
+                pos_data.append({
+                    "Symbol": sym,
+                    "Quantity": qty,
+                    "Avg Cost": f"${cost:.2f}",
+                })
+        st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
+    else:
+        st.info("No active positions (Flat).")
+
+    # 4. 实时日志流
+    st.divider()
+    st.subheader("Live Logs (Tail 50)")
+    
+    log_content = ""
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'r') as f:
+            lines = f.readlines()
+            # 只显示最后 50 行
+            log_content = "".join(lines[-50:])
+    else:
+        log_content = "Log file not found."
+
+    st.text_area("System Logs", log_content, height=300, disabled=True)
+
+
+# --- Module 2: Data Explorer ---
 def render_data_explorer():
     st.header("Data Warehouse Explorer (Parquet)")
     helper = get_query_helper()
@@ -104,7 +224,7 @@ def render_data_explorer():
             with t2: 
                 st.dataframe(df.sort_values('datetime', ascending=False), use_container_width=True)
 
-# --- Module 2: Analysis Explorer ---
+# --- Module 3: Analysis Explorer ---
 def render_analysis_explorer(helper):
     st.header("Factor Analysis Explorer")
     runner = get_analysis_runner(helper)
@@ -148,11 +268,25 @@ def render_analysis_explorer(helper):
 # --- Sidebar & Main Logic ---
 with st.sidebar:
     st.header("Navigation")
-    app_mode = st.radio("Choose Module", ["Strategy Explorer", "Data Explorer", "Analysis Explorer"])
+    app_mode = st.radio("Choose Module", [
+        "🔴 Live Dashboard", 
+        "Strategy Explorer", 
+        "Data Explorer", 
+        "Analysis Explorer"
+    ])
     
-    config = load_config('config.yaml')
+    # [核心修复] 使用新的配置加载逻辑 (mode='backtest' 提供给策略浏览器默认值)
+    config = get_cached_config(mode='backtest')
     helper = get_query_helper()
     
+    # Live 模式自动刷新
+    if app_mode == "🔴 Live Dashboard":
+        st.divider()
+        st.markdown("### ⏱️ Dashboard Control")
+        auto_refresh = st.toggle("Auto-Refresh (3s)", value=False)
+        if st.button("Manual Refresh"):
+            st.rerun()
+
     if app_mode == "Strategy Explorer":
         st.header("Parameters")
         bench_options = {"S&P 500 (SPY)": "SPY", "Global Equity (ACWI)": "ACWI", "Global Bond (AGG)": "AGG", "Commodities (GSG)": "GSG"}
@@ -177,25 +311,41 @@ with st.sidebar:
         st.divider()
         st.header("Costs & Execution")
         top_k = st.slider("Top K Stocks", 1, 20, 5)
-        comm_rate = st.number_input("Commission Rate", 0.0, 0.01, 0.0010, format="%.4f")
-        slip_rate = st.number_input("Slippage Rate", 0.0, 0.01, 0.0005, format="%.4f")
+        
+        # 使用 config 中的默认值 (如果 config 中没有，则用默认值)
+        default_comm = config.get('COMMISSION_RATE', 0.0010)
+        default_slip = config.get('SLIPPAGE', 0.0005)
+        
+        comm_rate = st.number_input("Commission Rate", 0.0, 0.01, default_comm, format="%.4f")
+        slip_rate = st.number_input("Slippage Rate", 0.0, 0.01, default_slip, format="%.4f")
         rebalance_days = st.slider("Rebalance Frequency", 1, 60, 20)
         col_s, col_r = st.columns(2)
         start_date = col_s.date_input("Start", datetime(2018, 1, 1))
         end_date = col_r.date_input("End", datetime(2024, 7, 31))
         run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
         
-    st.markdown("---")
-    with st.expander("📡 Data Status"):
-        if st.button("🔄 Sync Now", use_container_width=True):
-            subprocess.run([sys.executable, "run_data_sync.py"])
-            st.cache_resource.clear()
-            st.rerun()
+    if app_mode == "Data Explorer":
+        st.markdown("---")
+        with st.expander("📡 Data Status"):
+            if st.button("🔄 Sync Now", use_container_width=True):
+                subprocess.run([sys.executable, "run_data_sync.py"])
+                st.cache_resource.clear()
+                st.rerun()
 
-if app_mode == "Data Explorer": 
+# --- Main Routing ---
+if app_mode == "🔴 Live Dashboard":
+    render_live_dashboard()
+    # 自动刷新逻辑
+    if auto_refresh:
+        time.sleep(3)
+        st.rerun()
+
+elif app_mode == "Data Explorer": 
     render_data_explorer()
+
 elif app_mode == "Analysis Explorer": 
     render_analysis_explorer(helper)
+
 elif app_mode == "Strategy Explorer":
     st.title("Quantitative Strategy Explorer")
     
@@ -214,6 +364,7 @@ elif app_mode == "Strategy Explorer":
                 if factor_data.empty:
                     st.error("No factor data generated.")
                 else:
+                    # 使用工厂模式或原有逻辑
                     strategy = LinearWeightedStrategy(name="App_Strat", weights=factor_weights, top_k=top_k, 
                                                       stop_loss_pct=stop_loss_pct, max_pos_weight=max_pos_weight, max_drawdown_pct=max_drawdown_pct)
                     strategy.load_data(factor_data)
@@ -278,13 +429,11 @@ elif app_mode == "Strategy Explorer":
         excel_data = reporter.generate_excel_report(m, st.session_state.equity_df, holdings, trade_log)
         col_down1.download_button("📥 Download Excel Report", excel_data, f"Backtest_{datetime.now().strftime('%Y%m%d')}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         
-        # [核心修正] HTML 报告
-        # 直接从 metrics (m) 中获取 'drawdown_series'，这是由 performance.py 统一计算的
         html_report = reporter.generate_html_report(
             metrics=m,
             equity_curve=m['strategy_curve'],
             benchmark_curve=m['benchmark_curve'],
-            drawdown_series=m.get('drawdown_series'), # <--- 使用 performance.py 返回的标准数据
+            drawdown_series=m.get('drawdown_series'), 
             trade_log=trade_log
         )
         col_down2.download_button("🌏 Download HTML Report", html_report, f"Report_{datetime.now().strftime('%Y%m%d')}.html", "text/html", use_container_width=True)
@@ -300,7 +449,6 @@ elif app_mode == "Strategy Explorer":
             st.table(pd.DataFrame.from_dict({k: v for k, v in m.items() if not isinstance(v, pd.Series)}, orient='index', columns=['Value']).astype(str))
         
         elif active_tab == "Signals":
-            # [核心修正] 直接显示 trade_log
             if not trade_log.empty:
                 st.dataframe(trade_log, use_container_width=True)
             else:
@@ -308,9 +456,7 @@ elif app_mode == "Strategy Explorer":
             
         elif active_tab == "Trade Inspection":
             st.subheader("🔍 Individual Trade Inspection")
-            # [核心修正] 修复 AttributeError (MultIndex 处理)
             if hasattr(st.session_state.strategy, 'factor_data') and st.session_state.strategy.factor_data is not None:
-                # 使用 index.get_level_values 获取股票代码列表
                 available_assets = st.session_state.strategy.factor_data.index.get_level_values('sec_code').unique()
                 inspected_symbol = st.selectbox("Select Asset to Inspect", sorted(available_assets))
                 

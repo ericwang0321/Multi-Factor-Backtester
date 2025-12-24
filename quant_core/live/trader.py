@@ -55,3 +55,11 @@ class LiveTrader:
             "Net Liquidation": nav,
             "Connected": self.connector.ib.isConnected()
         }
+
+    def cancel_all_orders(self):
+        """
+        [新增] 撤销所有未成交的挂单
+        """
+        print("🚫 正在请求撤销所有订单...")
+        # ib_insync 的全局撤单指令
+        self.connector.ib.reqGlobalCancel()
