@@ -91,3 +91,56 @@ class DataQueryHelper:
         
         # 返回 Series
         return df['simple_return']
+
+    # =========================================================================
+    # [新增核心方法] 专门为 BacktestEngine 准备宽表矩阵
+    # =========================================================================
+    def get_price_matrix(self, universe_id: str = 'All') -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        直接返回回测所需的 Open/Close 宽表矩阵。
+        
+        功能职责：
+        1. 调用 get_all_price_data 获取清洗后的长表。
+        2. 根据 universe_id 过滤资产。
+        3. 执行 Pivot (长表变宽表)。
+        4. 执行 ffill (处理停牌数据)。
+        
+        Returns:
+            (open_matrix, close_matrix)
+        """
+        # 1. 复用已有的清洗逻辑 (DRY原则)
+        #    这样无需重写 vwap 重命名、空值填充等逻辑
+        df = self.get_all_price_data()
+        
+        if df.empty:
+            return pd.DataFrame(), pd.DataFrame()
+
+        # 2. 内存级过滤 Universe
+        #    利用 df 里已有的 category_id 列，无需读取外部 CSV，速度更快且一致性更高
+        if universe_id != 'All':
+            if 'category_id' in df.columns:
+                df = df[df['category_id'] == universe_id]
+            else:
+                # 理论上不会发生，因为 get_all_price_data 是 SELECT *
+                print(f"⚠️ 警告: 数据中缺少 category_id 列，无法过滤 Universe: {universe_id}")
+
+        if df.empty:
+             print(f"⚠️ 警告: 过滤后数据为空 (Universe={universe_id})")
+             return pd.DataFrame(), pd.DataFrame()
+
+        try:
+            # 3. 变形 (Pivot)
+            #    将 (Date, Code) -> Value 转换为 Index=Date, Col=Code
+            open_matrix = df.pivot(index='datetime', columns='sec_code', values='open')
+            close_matrix = df.pivot(index='datetime', columns='sec_code', values='close')
+
+            # 4. 填充 (Imputation)
+            #    ffill: 昨天的收盘价作为今天的收盘价 (处理停牌)
+            open_matrix = open_matrix.ffill()
+            close_matrix = close_matrix.ffill()
+
+            return open_matrix, close_matrix
+
+        except Exception as e:
+            print(f"❌ 数据变形 (Pivot) 失败: {e}")
+            return pd.DataFrame(), pd.DataFrame()
