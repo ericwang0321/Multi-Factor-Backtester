@@ -13,190 +13,181 @@ try:
     from quant_core.performance import calculate_extended_metrics, display_metrics
     from quant_core.data.query_helper import DataQueryHelper
 except ImportError as e:
-    print(f"导入库出错: {e}")
+    print(f"❌ 导入库出错: {e}")
     sys.exit(1)
 
-def load_config(config_path='config.yaml'):
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+# [递归合并配置]
+def recursive_update(base_dict, update_dict):
+    for key, value in update_dict.items():
+        if isinstance(value, dict) and key in base_dict and isinstance(base_dict[key], dict):
+            recursive_update(base_dict[key], value)
+        else:
+            base_dict[key] = value
+    return base_dict
 
-# [新增] 读取本地 parquet 因子的函数
-def load_offline_factors(factor_names, start_date, end_date, universe_codes):
-    """
-    从 data/processed/factors/ 读取预计算好的因子文件
-    """
-    base_dir = 'data/processed/factors'
+def load_combined_configs(file_list):
+    final_config = {}
+    print(f"⚙️  正在加载配置序列: {file_list}")
+    for config_path in file_list:
+        if not os.path.exists(config_path):
+            print(f"❌ 错误: 找不到配置文件: {config_path}")
+            sys.exit(1)
+        with open(config_path, 'r', encoding='utf-8') as f:
+            current_conf = yaml.safe_load(f) or {}
+            recursive_update(final_config, current_conf)
+    return final_config
+
+# [读取本地 parquet 因子]
+def load_offline_factors(factor_names, start_date, end_date, universe_codes, data_dir):
     loaded_data = {}
-    
-    print(f"正在加载离线因子数据: {factor_names} ...")
+    print(f"📂 正在加载因子数据: {factor_names} ...")
     
     for f_name in factor_names:
-        file_path = os.path.join(base_dir, f"{f_name}.parquet")
-        
-        # 检查文件是否存在
+        file_path = os.path.join(data_dir, f"{f_name}.parquet")
         if not os.path.exists(file_path):
-            print(f"❌ 错误: 找不到因子文件 {file_path}")
-            print(f"👉 请先运行 'python run_factor_computation.py' 生成因子数据！")
+            print(f"❌ 找不到因子文件: {file_path}")
             sys.exit(1)
-            
-        # 1. 读取 Parquet (宽表: Index=Date, Cols=Stocks)
         try:
             df = pd.read_parquet(file_path)
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+            df = df.sort_index().loc[str(start_date):str(end_date)]
+            valid_cols = df.columns.intersection(universe_codes)
+            if valid_cols.empty:
+                continue
+            stacked = df[valid_cols].stack()
+            stacked.name = f_name
+            loaded_data[f_name] = stacked
         except Exception as e:
-            print(f"❌ 读取文件 {f_name} 失败: {e}")
+            print(f"❌ 读取 {f_name} 失败: {e}")
             sys.exit(1)
-        
-        # 2. 时间切片
-        df = df.loc[str(start_date):str(end_date)]
-        
-        # 3. 过滤 Universe (只保留当前资产池中的股票列)
-        valid_cols = [c for c in df.columns if c in universe_codes]
-        if not valid_cols:
-            print(f"⚠️ 警告: 因子 {f_name} 在当前资产池({len(universe_codes)})中没有数据。")
-            continue
-            
-        df = df[valid_cols]
-        
-        # 4. 堆叠 (Stack) 为 Series，方便后续合并
-        stacked = df.stack()
-        stacked.name = f_name
-        loaded_data[f_name] = stacked
         
     if not loaded_data:
         return pd.DataFrame()
-        
-    # 5. 合并为大表 (Strategy 需要的格式)
     full_df = pd.concat(loaded_data.values(), axis=1)
     full_df.index.names = ['datetime', 'sec_code']
-    
     return full_df
 
 if __name__ == '__main__':
     # 1. 加载配置
-    config = load_config()
+    CONFIG_FILES = ['config/base.yaml', 'config/backtest.yaml']
+    config = load_combined_configs(CONFIG_FILES)
     
-    # 提取基础配置
-    START_DATE = config['backtest'].get('start_date', '2018-01-01')
-    END_DATE = config['backtest'].get('end_date', '2024-07-31')
-    SELECTED_UNIVERSE = config['strategy']['factor_strategy'].get('universe_to_trade', 'All')
+    # 提取顶层配置
+    bt_conf = config.get('backtest', {})
+    strat_conf = config.get('strategy', {})  # 这里拿到了整个 strategy 块
     
+    START_DATE = bt_conf.get('start_date', '2018-01-01')
+    END_DATE = bt_conf.get('end_date', '2024-07-31')
+    DATA_HOME = config.get('data_home', 'data/processed')
+    PRICE_PATH = os.path.join(DATA_HOME, 'all_price_data.parquet')
+    FACTOR_DIR = os.path.join(DATA_HOME, 'factors')
+
     # 2. 数据准备
-    print(f"\n--- 阶段 1: 数据准备 (资产池: {SELECTED_UNIVERSE}) ---")
-    
-    # 初始化 Helper
-    helper = DataQueryHelper(storage_path='data/processed/all_price_data.parquet')
-    
-    # 获取资产列表
+    print("\n--- 阶段 1: 数据准备 ---")
+    helper = DataQueryHelper(storage_path=PRICE_PATH)
     universe_df = helper.get_all_symbols()
     universe_codes = universe_df['sec_code'].tolist()
-    print(f"基础数据加载完成。总标的数: {len(universe_df)}")
+    print(f"✅ 基础数据加载完成。总标的数: {len(universe_df)}")
 
-    # 3. 初始化因子策略
+    # 3. 策略参数解析 (核心修改处！！！)
     print("\n--- 阶段 2: 初始化策略与因子加载 ---")
-    strategy_conf = config['strategy']['factor_strategy']
     
-    # 解析因子权重
-    if 'weights' in strategy_conf:
-        factor_weights = strategy_conf['weights']
+    # A. 获取通用参数 (Common)
+    common_conf = strat_conf.get('common', {})
+    risk_conf = common_conf.get('risk', {}) # 你的 yaml 里叫 risk
+    top_k = common_conf.get('top_k', 3)
+    
+    # B. 判断策略类型并提取参数
+    strat_type = strat_conf.get('type', 'linear')
+    print(f"ℹ️  当前策略模式: {strat_type}")
+
+    weights = {}
+    if strat_type == 'linear':
+        # 进去 linear_params 里找 weights
+        lin_params = strat_conf.get('linear_params', {})
+        weights = lin_params.get('weights', {})
     else:
-        # 兼容旧配置
-        f_name = strategy_conf.get('factor_name', 'rsi')
-        factor_weights = {f_name: 1.0}
+        print(f"⚠️ 暂不支持的策略类型: {strat_type}")
+        sys.exit(1)
+
+    if not weights:
+        print("❌ 错误: 在 'linear_params' 中未找到 'weights'，请检查 config/backtest.yaml")
+        sys.exit(1)
     
-    factor_list = list(factor_weights.keys())
-    
-    # 解析风控配置 (新增)
-    risk_conf = strategy_conf.get('risk_management', {})
-    
-    # [关键步骤] 加载离线因子数据
+    # C. 加载因子
+    factor_list = list(weights.keys())
     factor_data = load_offline_factors(
-        factor_list, START_DATE, END_DATE, universe_codes
+        factor_list, START_DATE, END_DATE, universe_codes, FACTOR_DIR
     )
     
     if factor_data.empty:
-        print("❌ 错误：未能加载任何因子数据，无法启动回测。")
+        print("❌ 无法加载因子数据，退出。")
         sys.exit(1)
 
-    # 实例化新策略 (注入风控参数)
+    # 4. 实例化策略
+    # 注意：这里把解析出来的 risk 参数传进去
     strategy = LinearWeightedStrategy(
-        name="Offline_Linear_Strategy",
-        weights=factor_weights,
-        top_k=strategy_conf.get('top_n', 5),
-        # --- 【修改】传入 Config 中的风控参数 ---
+        name=common_conf.get('name', "Backtest_Strategy"),
+        weights=weights,
+        top_k=top_k,
         stop_loss_pct=risk_conf.get('stop_loss_pct'),
         max_pos_weight=risk_conf.get('max_pos_weight'),
         max_drawdown_pct=risk_conf.get('max_drawdown_pct')
     )
     
-    # 注入数据
     strategy.load_data(factor_data)
-    print("✅ 策略初始化及离线数据注入完成。")
+    print(f"✅ 策略就绪。权重: {weights}")
+    print(f"🛡️  风控配置: {risk_conf}")
 
-    # 4. 执行回测
-    print("\n--- 阶段 3: 执行回测 ---")
-    BACKTEST_CONFIG = {
-        'INITIAL_CAPITAL': config['backtest'].get('initial_capital', 1000000),
-        'COMMISSION_RATE': config['backtest'].get('commission_rate', 0.001),
-        'SLIPPAGE': config['backtest'].get('slippage', 0.0005),
-        'REBALANCE_DAYS': config['backtest'].get('rebalance_days', 20),
-        'REBALANCE_MONTHS': config['backtest'].get('rebalance_months', 1)
+    # 5. 运行回测
+    print("\n--- 阶段 3: 运行回测 ---")
+    engine_config = {
+        'INITIAL_CAPITAL': bt_conf.get('initial_capital', 1000000),
+        'COMMISSION_RATE': bt_conf.get('commission_rate', 0.001),
+        'SLIPPAGE': 0.0005,
+        'BENCHMARK': bt_conf.get('benchmark', 'SPY'),
+        'REBALANCE_DAYS': 20
     }
 
-    # 实例化回测引擎
     engine = BacktestEngine(
         start_date=START_DATE,
         end_date=END_DATE,
-        config=BACKTEST_CONFIG,
+        config=engine_config,
         strategy=strategy,
         query_helper=helper,
-        universe_to_run=SELECTED_UNIVERSE
+        universe_to_run='All'
     )
     
-    # 运行
     portfolio_history, final_portfolio = engine.run()
 
-    # 5. 结果展示
+    # 6. 结果展示
     print("\n--- 阶段 4: 结果分析 ---")
     
-    # 尝试获取基准
     benchmark_equity = None
     try:
-        bench_symbol = 'SPY' 
-        bench_ret = helper.get_benchmark_returns(bench_symbol)
-        
+        bench_ret = helper.get_benchmark_returns(engine_config['BENCHMARK'])
         if not bench_ret.empty:
-            bench_ret = bench_ret.loc[START_DATE:END_DATE]
-            benchmark_equity = (1 + bench_ret).cumprod() * BACKTEST_CONFIG['INITIAL_CAPITAL']
-            benchmark_equity = benchmark_equity.reindex(portfolio_history.index, method='ffill').fillna(BACKTEST_CONFIG['INITIAL_CAPITAL'])
-    except Exception as e:
-        print(f"⚠️ 基准数据获取失败 ({e})，使用平线基准。")
+            if not isinstance(bench_ret.index, pd.DatetimeIndex):
+                bench_ret.index = pd.to_datetime(bench_ret.index)
+            bench_ret = bench_ret.sort_index().loc[START_DATE:END_DATE]
+            benchmark_equity = (1 + bench_ret).cumprod() * engine_config['INITIAL_CAPITAL']
+            benchmark_equity = benchmark_equity.reindex(portfolio_history.index, method='ffill').fillna(engine_config['INITIAL_CAPITAL'])
+    except:
         pass
-        
-    if benchmark_equity is None:
-        benchmark_equity = pd.Series(BACKTEST_CONFIG['INITIAL_CAPITAL'], index=portfolio_history.index)
-
-    equity_curve = portfolio_history['total_value']
     
-    metrics = calculate_extended_metrics(
-        portfolio_equity=equity_curve,
-        benchmark_equity=benchmark_equity,
-        portfolio_instance=final_portfolio
-    )
+    if benchmark_equity is None:
+        benchmark_equity = pd.Series(engine_config['INITIAL_CAPITAL'], index=portfolio_history.index)
+
+    metrics = calculate_extended_metrics(portfolio_history['total_value'], benchmark_equity, final_portfolio)
     display_metrics(metrics, benchmark_loaded=True)
 
-    # 简单绘图
     plt.figure(figsize=(12, 6))
-    
-    strat_norm = equity_curve / equity_curve.iloc[0]
-    bench_norm = benchmark_equity / benchmark_equity.iloc[0]
-    
-    strat_norm.plot(label='Strategy', linewidth=2)
-    bench_norm.plot(label='Benchmark', linestyle='--', alpha=0.7)
-    
-    plt.title(f"Backtest: {list(factor_weights.keys())} (StopLoss: {risk_conf.get('stop_loss_pct')})")
+    (portfolio_history['total_value'] / portfolio_history['total_value'].iloc[0]).plot(label='Strategy')
+    (benchmark_equity / benchmark_equity.iloc[0]).plot(label='Benchmark', linestyle='--')
     plt.legend()
-    plt.grid(True, alpha=0.3)
+    plt.title(f"Backtest: {list(weights.keys())}")
     
-    output_path = f"backtest_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    plt.savefig(output_path)
-    print(f"\n📊 结果图表已保存至: {output_path}")
+    if not os.path.exists('results'): os.makedirs('results')
+    plt.savefig(f"results/backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+    print("\n✅ 回测完成")

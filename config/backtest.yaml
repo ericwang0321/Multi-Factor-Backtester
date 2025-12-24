@@ -1,16 +1,27 @@
 # config/backtest.yaml
 
-# --- 2.1 回测环境特有参数 ---
-backtest:
-  start_date: '2020-01-01'
-  end_date: '2025-01-01'
-  initial_equity: 1000000
-
-# --- 2.2 覆盖 base.yaml 中的策略参数 ---
+# ==========================================
+# 2. 策略覆盖 (完全独立于回测)
+# ==========================================
 strategy:
+  # [这里可以选] 即使 base 选了 linear，实盘也可以在这里改成 ml
+  type: 'linear'  
+
   common:
-    top_k: 10               # 回测时想看 Top 10 的表现
+    name: 'Live_Production_V1'
+    top_k: 3                # 实盘更精简
+    risk:
+      stop_loss_pct: 0.05    # 实盘风控更严
+      max_pos_weight: 0.3
+      max_drawdown_pct: 0.15
+
+  # 如果 type 是 linear，工厂会读取这里
   linear_params:
     weights:
-      alpha013: 0.8         # 回测想重点测试 alpha013
-      rsi: 0.2
+      alpha013: 0.6
+      rsi: 0.4
+
+  # 如果 type 改成 ml，工厂会读取这里
+  ml_params:
+    model_path: 'models/prod_model_v1.pkl'
+    feature_list: ['alpha013', 'rsi']
