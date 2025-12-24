@@ -1,7 +1,7 @@
 # quant_core/strategies/rules.py
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from .base import BaseStrategy
 
 class LinearWeightedStrategy(BaseStrategy):
@@ -9,14 +9,14 @@ class LinearWeightedStrategy(BaseStrategy):
     传统多因子线性加权策略 (Linear Weighted Multi-Factor)
     
     逻辑:
-    1. 获取当日因子值。
-    2. Z-Score 标准化 (去量纲)。
-    3. 按权重加权求和得到总分。
-    4. 选 Top-K。
+    1. 声明所需因子 (get_required_factors)。
+    2. 获取当日因子值。
+    3. Z-Score 标准化 (去量纲)。
+    4. 按权重加权求和得到总分。
+    5. 选 Top-K。
     """
 
     def __init__(self, name: str, weights: Dict[str, float], top_k: int = 5,
-                 # [修改 1] 新增风控参数接口
                  stop_loss_pct: Optional[float] = None,
                  max_pos_weight: Optional[float] = None,
                  max_drawdown_pct: Optional[float] = None):
@@ -29,7 +29,7 @@ class LinearWeightedStrategy(BaseStrategy):
             max_pos_weight: 单票限仓
             max_drawdown_pct: 熔断比例
         """
-        # [修改 2] 将风控参数传递给父类 BaseStrategy
+        # 将风控参数传递给父类 BaseStrategy
         super().__init__(name, top_k, stop_loss_pct, max_pos_weight, max_drawdown_pct)
         
         self.weights = weights
@@ -42,6 +42,16 @@ class LinearWeightedStrategy(BaseStrategy):
             
         print(f"[{self.name}] 因子权重配置: {self.weights}")
 
+    # =========================================================================
+    # [新增] 实现基类的抽象方法：告诉主脚本我需要哪些因子
+    # =========================================================================
+    def get_required_factors(self) -> List[str]:
+        """
+        返回权重字典的 keys，即策略需要的因子列表。
+        例如: ['alpha013', 'rsi']
+        """
+        return list(self.weights.keys())
+
     def calculate_scores(self, factor_df: pd.DataFrame) -> pd.Series:
         """
         实现基类的 calculate_scores 接口
@@ -53,7 +63,7 @@ class LinearWeightedStrategy(BaseStrategy):
         # 2. 遍历每个因子进行加权
         for factor_name, weight in self.weights.items():
             if factor_name not in factor_df.columns:
-                # 如果预计算数据里没有这个因子，可以选择打印警告或跳过
+                # 如果数据里没有这个因子，跳过（理论上 Bridge 已经准备好了，但为了稳健）
                 continue
             
             # 获取原始因子值

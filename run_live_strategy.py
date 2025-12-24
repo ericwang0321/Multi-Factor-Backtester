@@ -9,6 +9,7 @@ import traceback
 from quant_core.live.trader import LiveTrader
 from quant_core.live.data_bridge import LiveDataBridge
 from quant_core.strategies.rules import LinearWeightedStrategy
+# from quant_core.strategies.ml_strategy import MLStrategy # [未来扩展]
 
 # --- [新增] 引入工具模块 ---
 # (请确保 quant_core/utils/__init__.py 存在)
@@ -112,14 +113,30 @@ def main():
 
         bridge = LiveDataBridge(trader.connector, UNIVERSE_PATH)
         
-        # --- Step 1: 准备数据 ---
-        logger.info("⚡ [Data] 正在获取历史数据并计算因子 (Lookback: 365)...")
+        # ==============================================================================
+        # [架构升级] Step 1: 先初始化策略 (Strategy First)
+        # ==============================================================================
+        # 我们先创建策略对象，然后再问它 "你需要什么数据?"
+        # 这样无论以后是 Linear 还是 ML 策略，主脚本逻辑都不用变
+        strategy = LinearWeightedStrategy(
+            name=STRATEGY_CONFIG['name'],
+            weights=STRATEGY_CONFIG['weights'],
+            top_k=STRATEGY_CONFIG['top_k'],
+            stop_loss_pct=STRATEGY_CONFIG['stop_loss_pct'],
+            max_pos_weight=STRATEGY_CONFIG['max_pos_weight'],
+            max_drawdown_pct=STRATEGY_CONFIG['max_drawdown_pct']
+        )
         
-        required_factors = list(STRATEGY_CONFIG['weights'].keys())
+        # [关键] 动态获取策略所需的因子列表
+        required_factors = strategy.get_required_factors()
+        logger.info(f"🧠 策略 [{strategy.name}] 请求因子数据: {required_factors}")
+        
+        # --- Step 2: 准备数据 (Data Fetching) ---
+        logger.info("⚡ [Data] 正在获取历史数据并计算因子 (Lookback: 365)...")
         today_str = datetime.now().strftime('%Y-%m-%d')
         
         factor_df, current_prices = bridge.prepare_data_for_strategy(
-            required_factors, 
+            required_factors, # <--- 传入策略请求的列表
             lookback_window=365,
             bar_size='1 day'
         )
@@ -131,21 +148,13 @@ def main():
         # 调试信息记录
         logger.info(f"🔍 因子快照 (前3行): \n{factor_df.head(3)}")
         
-        # [关键修复] 构建 MultiIndex (Date, Code)
+        # [数据适配] 构建 MultiIndex (Date, Code) 以适配 BaseStrategy
         factor_df.index.name = 'sec_code'
         factor_df = factor_df.reset_index()
         factor_df['date'] = today_str
         factor_df = factor_df.set_index(['date', 'sec_code'])
 
-        # --- Step 2: 策略计算 ---
-        strategy = LinearWeightedStrategy(
-            name=STRATEGY_CONFIG['name'],
-            weights=STRATEGY_CONFIG['weights'],
-            top_k=STRATEGY_CONFIG['top_k'],
-            stop_loss_pct=STRATEGY_CONFIG['stop_loss_pct'],
-            max_pos_weight=STRATEGY_CONFIG['max_pos_weight'],
-            max_drawdown_pct=STRATEGY_CONFIG['max_drawdown_pct']
-        )
+        # --- Step 3: 注入数据并运行 (Execution) ---
         strategy.load_data(factor_df, price_df=None)
 
         portfolio_state = build_portfolio_state(trader.connector)
@@ -163,7 +172,7 @@ def main():
         )
         logger.info(f"🎯 策略输出目标权重: {target_weights}")
 
-        # --- Step 3: 交易执行与汇报 ---
+        # --- Step 4: 交易执行与汇报 ---
         if not target_weights and not portfolio_state['positions']:
             logger.info("😴 策略无信号且空仓，无操作。")
             notifier.send(f"实盘报告 {today_str}", f"执行完毕。当前净值: ${total_equity:,.2f}\n无交易信号。")
@@ -179,9 +188,9 @@ def main():
             logger.info("🔄 开始执行调仓...")
             trader.execute_rebalance(target_quantities)
             
-            # [新增] 简易的订单确认 (等待 3 秒给 IB 处理)
+            # [订单确认] 等待 3 秒给 IB 处理
             time.sleep(3)
-            # [修复] 使用 openTrades()，因为它同时包含 Order 和 Contract 信息
+            # [修复] 使用 openTrades() 获取完整的交易/合约信息
             open_trades = trader.connector.ib.openTrades() 
             
             open_order_str = "\n".join([

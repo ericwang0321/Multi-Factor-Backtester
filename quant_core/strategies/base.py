@@ -7,12 +7,15 @@ import numpy as np
 
 class BaseStrategy(ABC):
     """
-    策略基类 (Abstract Base Class) - V3 (支持基础风控)
+    策略基类 (Abstract Base Class) - V4 (支持因子依赖声明)
     
-    新增风控模块:
-    1. Circuit Breaker (熔断): 净值回撤超过阈值，强制空仓。
-    2. Stop Loss (个股止损): 个股亏损超过阈值，强制剔除。
-    3. Position Limit (限仓): 单票权重上限。
+    新增功能:
+    1. get_required_factors: 策略主动声明所需因子列表 (依赖倒置)。
+    
+    保留功能:
+    2. Circuit Breaker (熔断): 净值回撤超过阈值，强制空仓。
+    3. Stop Loss (个股止损): 个股亏损超过阈值，强制剔除。
+    4. Position Limit (限仓): 单票权重上限。
     
     流水线:
     OnBar -> 熔断检查 -> 算分 -> 选股 -> 定权 -> 限仓检查 -> 止损覆盖
@@ -39,6 +42,18 @@ class BaseStrategy(ABC):
         if any([stop_loss_pct, max_pos_weight, max_drawdown_pct]):
             print(f"🛡️ 风控开启: 止损={stop_loss_pct}, 限仓={max_pos_weight}, 熔断={max_drawdown_pct}")
 
+    # =========================================================================
+    # [新增] 核心接口：依赖倒置
+    # =========================================================================
+    @abstractmethod
+    def get_required_factors(self) -> List[str]:
+        """
+        【新增抽象方法】
+        策略必须声明它依赖哪些因子名 (e.g., ['RSI', 'Momentum'] 或 ['feature_1', ...])
+        RunLiveStrategy 会根据这个列表去 Bridge 取数据。
+        """
+        pass
+
     def load_data(self, factor_df: pd.DataFrame, price_df: Optional[pd.DataFrame] = None):
         """注入数据 (因子 + 可选的价格数据)"""
         self.factor_data = factor_df
@@ -49,10 +64,19 @@ class BaseStrategy(ABC):
     def get_day_factors(self, date, universe_codes: List[str]) -> pd.DataFrame:
         """获取当日因子切片"""
         if self.factor_data is None: return pd.DataFrame()
-        if date not in self.factor_data.index.get_level_values(0): return pd.DataFrame()
+        
+        # 兼容性处理：确保 factor_data 是 MultiIndex (Date, Code)
+        # 如果不是 MultiIndex，说明数据加载有问题，直接返回空
+        if not isinstance(self.factor_data.index, pd.MultiIndex):
+            return pd.DataFrame()
+
+        # 检查日期是否在索引 Level 0 中
+        if date not in self.factor_data.index.get_level_values(0): 
+            return pd.DataFrame()
         
         try:
             day_df = self.factor_data.loc[date]
+            # 筛选出 universe 里的代码，防止 KeyError
             valid_codes = [c for c in universe_codes if c in day_df.index]
             return day_df.loc[valid_codes]
         except KeyError:
