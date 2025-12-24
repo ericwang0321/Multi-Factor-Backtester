@@ -17,7 +17,7 @@ STRATEGY_CONFIG = {
     'name': 'Live_MultiFactor_v1',
     'weights': {
         'alpha013': 0.6, 
-        'RSI': 0.4
+        'rsi': 0.4
     },
     'top_k': 3,
     # 风控参数
@@ -112,14 +112,13 @@ def main():
 
     try:
         # --- Step 1: 准备数据 ---
-        # 你的策略需要哪些因子？
         required_factors = list(STRATEGY_CONFIG['weights'].keys())
+        today_str = datetime.now().strftime('%Y-%m-%d') # 获取今日日期字符串
         
-        # 从 IB 获取数据并计算因子
-        # lookback_window=500 表示获取过去 500 天数据来算 MA/RSI
+        # 获取数据 (Index=Code, Columns=Factors)
         factor_df, current_prices = bridge.prepare_data_for_strategy(
             required_factors, 
-            lookback_window=365,
+            lookback_window=365, # 保持 365 以确保足够的预热
             bar_size='1 day'
         )
         
@@ -127,8 +126,26 @@ def main():
             print("⚠️ 未获取到有效因子数据，跳过本次执行。")
             return
 
-        # 注入数据到策略
-        strategy.load_data(factor_df, price_df=None) # 实盘不需要注入全量 price_df，on_bar 会传 current_prices
+        # [🔍 调试打印] 看看因子到底算出来没？
+        print(f"\n🔍 因子快照 (前3行): \n{factor_df.head(3)}")
+        print(f"   包含 NaN? {factor_df.isnull().values.any()}")
+
+        # ==============================================================================
+        # [关键修复] 升维处理：构建 MultiIndex (Date, Code) 以适配 BaseStrategy
+        # ==============================================================================
+        # 1. 此时 factor_df 的 Index 是股票代码 (如 'SPY', 'AAPL')
+        factor_df.index.name = 'sec_code' 
+        factor_df = factor_df.reset_index() # 将 sec_code 变成一列
+        
+        # 2. 加上日期列
+        factor_df['date'] = today_str 
+        
+        # 3. 重新设置为双重索引 (Date, sec_code)
+        factor_df = factor_df.set_index(['date', 'sec_code'])
+        # ==============================================================================
+
+        # 注入数据到策略 (此时结构已符合策略预期)
+        strategy.load_data(factor_df, price_df=None)
 
         # --- Step 2: 获取当前账户状态 ---
         portfolio_state = build_portfolio_state(trader.connector)
@@ -136,31 +153,39 @@ def main():
         print(f"\n📊 当前账户净值: ${total_equity:,.2f}")
 
         # --- Step 3: 运行策略逻辑 (On Bar) ---
-        today_date = datetime.now().strftime('%Y-%m-%d')
-        # 这里的 universe_codes 应该传 factor_df 的 index (实际获取到数据的票)
-        universe_codes = factor_df.index.tolist()
+        # 注意：这里传入的 universe_codes 必须是纯代码列表
+        # factor_df 现在是 MultiIndex，我们需要提取 Level 1 (sec_code)
+        universe_codes = factor_df.index.get_level_values('sec_code').unique().tolist()
         
-        # 获取目标权重 {'SPY.P': 0.3, ...}
+        # 调用策略
         target_weights = strategy.on_bar(
-            date=today_date, # 实盘这里的 date 主要用于日志
+            date=today_str, # 必须和上面 factor_df['date'] 一致
             universe_codes=universe_codes,
             portfolio_state=portfolio_state,
             current_prices=current_prices
         )
         
+        # [🔍 调试打印] 看看策略算出的权重
+        print(f"🎯 策略输出目标权重: {target_weights}")
+
         if not target_weights and not portfolio_state['positions']:
             print("😴 策略无信号且空仓，无操作。")
         else:
             # --- Step 4: 执行交易 ---
-            # 处理 Mapping 问题: 策略返回 'SPY.P'，IB 需要 'SPY'
-            # 这里的 clean_target_weights 键值将变为 'SPY'
+            # [修复点 1] 清洗价格字典的 Key (从 'IAGG.B' -> 'IAGG')
+            clean_prices = {}
+            for k, v in current_prices.items():
+                short_sym = k.split('.')[0]
+                clean_prices[short_sym] = v
+            
+            # [修复点 2] 清洗目标权重的 Key (从 'IAGG.B' -> 'IAGG')
             clean_target_weights = {}
             for code, w in target_weights.items():
                 symbol = code.split('.')[0] # 去掉后缀
                 clean_target_weights[symbol] = w
             
-            # 将权重转化为具体股数
-            target_quantities = weight_to_quantity(clean_target_weights, current_prices, total_equity)
+            # 现在两个字典的 Key 都是 'IAGG', 'DBA' 了，可以匹配上了
+            target_quantities = weight_to_quantity(clean_target_weights, clean_prices, total_equity)
             
             # 发送给 Trader 执行
             trader.execute_rebalance(target_quantities)
