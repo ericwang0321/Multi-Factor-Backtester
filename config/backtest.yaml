@@ -1,0 +1,16 @@
+# config/backtest.yaml
+
+# --- 2.1 回测环境特有参数 ---
+backtest:
+  start_date: '2020-01-01'
+  end_date: '2025-01-01'
+  initial_equity: 1000000
+
+# --- 2.2 覆盖 base.yaml 中的策略参数 ---
+strategy:
+  common:
+    top_k: 10               # 回测时想看 Top 10 的表现
+  linear_params:
+    weights:
+      alpha013: 0.8         # 回测想重点测试 alpha013
+      rsi: 0.2

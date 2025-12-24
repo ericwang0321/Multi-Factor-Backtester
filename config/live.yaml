@@ -1,0 +1,41 @@
+# config/live.yaml
+
+# ==========================================
+# 1. 实盘环境特有参数
+# ==========================================
+ib_connection:
+  host: '127.0.0.1'
+  port: 7497
+  client_id: 1
+
+notifications:
+  email:
+    enabled: true
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+
+# ==========================================
+# 2. 策略覆盖 (完全独立于回测)
+# ==========================================
+strategy:
+  # [这里可以选] 即使 base 选了 linear，实盘也可以在这里改成 ml
+  type: 'linear'  
+
+  common:
+    name: 'Live_Production_V1'
+    top_k: 3                # 实盘更精简
+    risk:
+      stop_loss_pct: 0.05    # 实盘风控更严
+      max_pos_weight: 0.3
+      max_drawdown_pct: 0.15
+
+  # 如果 type 是 linear，工厂会读取这里
+  linear_params:
+    weights:
+      alpha013: 0.6
+      rsi: 0.4
+
+  # 如果 type 改成 ml，工厂会读取这里
+  ml_params:
+    model_path: 'models/prod_model_v1.pkl'
+    feature_list: ['alpha013', 'rsi']

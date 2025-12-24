@@ -9,3 +9,4 @@ __pycache__/
 logs/
 plots/
 .DS_Store
+config/secrets.yaml

@@ -1,0 +1,39 @@
+# ==========================================
+# 1. 全局通用配置
+# ==========================================
+universe_path: 'data/reference/sec_code_category_grouped.csv'
+
+# ==========================================
+# 2. 策略配置 (Strategy Configuration)
+# ==========================================
+strategy:
+  # [核心开关] 决定当前运行哪个策略逻辑
+  # 选项: 'linear' (多因子线性加权) | 'ml' (机器学习预测)
+  type: 'linear'  
+
+  # --- A. 所有策略共有的通用参数 ---
+  common:
+    name: 'MultiFactor_v1'
+    top_k: 3
+    
+    # 策略级风控 (由 BaseStrategy 的 on_bar 逻辑处理)
+    risk:
+      stop_loss_pct: 0.05       # 个股止损 5%
+      max_pos_weight: 0.3       # 单票限仓 30%
+      max_drawdown_pct: 0.15    # 账户熔断 15%
+
+  # --- B. 线性策略专用配置 ---
+  # 只有当 type 为 'linear' 时，工厂函数才会读取此处
+  linear_params:
+    weights:
+      alpha013: 0.6
+      rsi: 0.4
+
+  # --- C. 机器学习策略专用配置 (预留扩展) ---
+  # 只有当 type 为 'ml' 时，工厂函数才会读取此处
+  ml_params:
+    model_path: 'models/latest_model.pkl'
+    feature_list: 
+      - 'alpha013'
+      - 'rsi'
+      - 'volatility_20d'
