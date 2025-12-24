@@ -7,7 +7,7 @@
 **核心架构特点：**
 
 * 🚀 **离线预计算 (Pre-computation)**：彻底分离“因子计算”与“策略回测”。通过 `run_factor_computation.py` 实现因子的全量向量化计算与持久化存储，回测速度提升 **100x**。
-* 🏗 **策略内聚 (Strategy Cohesion)**：采用依赖注入模式。策略类 (`BaseStrategy`) 自行持有数据并负责打分，回测引擎 (`BacktestEngine`) 仅专注于交易撮合。
+* 🏭 **工厂模式与自动注册 (Factory & Registry)**：采用工业级设计模式。新增策略只需添加装饰器 `@register_strategy`，无需修改引擎代码，真正做到 **开闭原则 (Open/Closed Principle)**。
 * ⚙️ **配置解耦 (Config Decoupling)**：采用层级配置系统（Base + Environment），支持回测与实盘使用完全独立的参数集，防止环境污染。
 * 💾 **高性能数据层**：基于 **DuckDB** 和 **Parquet** 构建本地数据仓库，支持海量行情与因子数据的秒级查询。
 * ⚡ **实盘无缝切换**：采用适配器模式，通过 `LiveDataBridge` 复用回测策略逻辑，实现从回测到实盘的零代码修改迁移。
@@ -18,6 +18,7 @@
 
 **目前处于：阶段 4.5 - 架构重构与深度扩展 (Refactoring & Extension)**
 
+* ✅ **策略工厂重构**：移除了硬编码的 `if/else` 判断，实现策略类的自动注册与参数自动注入。
 * ✅ **配置系统重构**：实现了 `base.yaml` (基础设施) 与 `backtest.yaml`/`live.yaml` (环境参数) 的分离与递归合并。
 * ✅ **数据仓库**：DuckDB + Parquet 架构，支持增量同步 IBKR/外部数据。
 * ✅ **因子工厂**：`run_factor_computation.py` 支持 Xarray 全向量化计算与增量更新。
@@ -37,11 +38,12 @@
 graph LR
     A[数据源/IBKR] -->|run_data_sync.py| B(原始行情 Parquet)
     B -->|run_factor_computation.py| C(因子数据 Parquet)
-    Config[config/backtest.yaml] -->|Load Params| D[策略 Strategy]
-    C -->|Load Offline| D
+    Config[config/backtest.yaml] -->|Load Params| F{策略工厂 Factory}
+    C -->|Load Offline| D[策略 Strategy]
+    F -.->|Create| D
     B -->|Load Price| E[回测引擎 BacktestEngine]
     D -->|Signal| E
-    E -->|Result| F[绩效分析/Streamlit]
+    E -->|Result| F_Res[绩效分析/Streamlit]
 
 ```
 
@@ -53,7 +55,8 @@ graph LR
     B -->|data_bridge| C{LiveDataBridge}
     C -- 1. fetch history --> D[数据预热 Warm-up]
     C -- 2. calc on-the-fly --> E[实时因子计算]
-    Config[config/live.yaml] -->|Load Params| F[策略 Strategy]
+    Config[config/live.yaml] -->|Load Params| Fact{策略工厂 Factory}
+    Fact -.->|Create| F[策略 Strategy]
     E -->|Feed| F
     F -->|Target Weights| G[交易员 LiveTrader]
     G -- 1. Diff Calc --> H[计算仓位差额]
@@ -68,7 +71,7 @@ graph LR
 ### 📂 根目录 (Root)
 
 * **`run_backtest.py`**: **[回测入口]**
-* **作用**：读取 `config/base.yaml` 和 `config/backtest.yaml`，加载离线因子，实例化策略并运行回测。
+* **作用**：读取配置文件，通过工厂创建策略实例，加载离线因子并运行回测。**无需修改此文件即可运行新策略。**
 
 
 * **`run_live_strategy.py`**: **[实盘指挥官]**
@@ -107,9 +110,9 @@ graph LR
 
 #### 🔹 `quant_core/strategies/` (策略库)
 
-* **`base.py`**: 策略基类，定义标准接口 (`load_data`, `generate_signals`)。
+* **`base.py`**: 包含 `BaseStrategy` 基类以及 **核心工厂逻辑 (`create_strategy_instance`, `@register_strategy`)**。
 * **`rules.py`**: 线性策略实现 (`LinearWeightedStrategy`)。
-* **`ml_strategy.py`** (Todo): 机器学习策略模板。
+* **`__init__.py`**: 负责暴露工厂接口并导入策略模块以触发注册。
 
 #### 🔹 `quant_core/live/` (实盘模块)
 
@@ -121,53 +124,63 @@ graph LR
 
 ## 5. 开发者指南：如何新增策略 (Developer Guide)
 
-本框架支持高度自定义。假设你想新增一个 **深度学习策略 (Deep Learning Strategy)**，请遵循以下步骤：
+本框架采用**全自动注册机制**。假设你想新增一个 **深度学习策略 (Deep Learning Strategy)**，你只需要关注策略本身的逻辑，**无需修改 `run_backtest.py**`。
 
-### 第一步：创建策略类
+### 第一步：创建策略文件
 
-在 `quant_core/strategies/` 下新建 `dl_strategy.py`，继承 `BaseStrategy`。
+在 `quant_core/strategies/` 下新建 `dl_strategy.py`。
+使用 `@register_strategy` 装饰器给它起个名字（例如 `'dl_model'`）。
 
 ```python
 # quant_core/strategies/dl_strategy.py
 import pandas as pd
-from .base import BaseStrategy
+from typing import List
+from .base import BaseStrategy, register_strategy  # <--- 引入装饰器
 
+# 1. 注册策略 (key: 'dl_model')
+@register_strategy('dl_model')
 class DeepLearningStrategy(BaseStrategy):
+    
+    # 2. 初始化 (注意：必须接收 **kwargs 并传给 super)
     def __init__(self, name, model_path, feature_cols, top_k=5, **kwargs):
-        super().__init__(name, top_k=top_k, **kwargs)
+        super().__init__(name, top_k=top_k, **kwargs) # 自动处理风控参数
         self.model_path = model_path
         self.feature_cols = feature_cols
-        #在此处加载模型 (e.g., PyTorch/TensorFlow/Sklearn)
-        # self.model = load_model(model_path) 
+        # load_model(self.model_path) ...
+        print(f"[{name}] DL模型已加载: {model_path}")
     
-    def generate_signals(self, dt):
-        """
-        重写父类方法。
-        根据 self.data (已加载的因子数据) 和 dt (当前时间) 生成持仓信号。
-        """
-        # 1. 获取截面数据
-        current_features = self.get_feature_slice(dt, self.feature_cols)
-        
-        # 2. 模型预测
-        # scores = self.model.predict(current_features)
-        scores = current_features.mean(axis=1) # (示例：仅做简单平均)
-        
-        # 3. 排序并生成目标权重
-        top_assets = scores.nlargest(self.top_k)
-        
-        # 4. 归一化权重 (等权)
-        weights = pd.Series(1.0 / self.top_k, index=top_assets.index)
-        return weights
+    # 3. 声明所需因子 (系统会自动去加载数据)
+    def get_required_factors(self) -> List[str]:
+        return self.feature_cols
+    
+    # 4. 核心逻辑
+    def calculate_scores(self, factor_df: pd.DataFrame) -> pd.Series:
+        # data = factor_df[self.feature_cols]
+        # scores = self.model.predict(data)
+        return pd.Series() # 返回打分
 
 ```
 
-### 第二步：修改配置文件
+### 第二步：确保模块被导入
 
-在 `config/backtest.yaml` (或 `live.yaml`) 中，将 `strategy` 节点指向你的新策略。
+打开 `quant_core/strategies/__init__.py`，添加一行 import。
+*这一步是为了让 Python 解释器读到你的文件，从而触发装饰器注册。*
+
+```python
+# quant_core/strategies/__init__.py
+from .base import create_strategy_instance, STRATEGY_REGISTRY
+from . import rules
+from . import dl_strategy  # <--- 新增这一行
+
+```
+
+### 第三步：修改配置文件
+
+在 `config/backtest.yaml` (或 `live.yaml`) 中，修改 `type` 并添加对应的参数块。
 
 ```yaml
 strategy:
-  # 1. 修改类型标识
+  # 1. 对应 @register_strategy('dl_model')
   type: 'dl_model'  
 
   common:
@@ -176,49 +189,14 @@ strategy:
     risk:
       stop_loss_pct: 0.05
 
-  # 2. 添加 DL 策略专用参数
-  dl_params:
+  # 2. 工厂会自动把这个块里的参数传给你的 __init__
+  dl_model_params:
     model_path: 'models/lstm_v1.pth'
-    feature_list: ['alpha001', 'volatility_20d', 'rsi']
+    feature_cols: ['alpha001', 'volatility_20d', 'rsi']
 
 ```
 
-### 第三步：注册到运行入口
-
-修改 `run_backtest.py` (以及 `run_live_strategy.py`) 的策略初始化部分，加入新策略的分支逻辑。
-
-```python
-# run_backtest.py 中的 "阶段 2" 部分
-
-# ... 前序代码 ...
-strat_type = strat_conf.get('type', 'linear')
-
-if strat_type == 'linear':
-    # (原有逻辑)
-    strategy = LinearWeightedStrategy(...)
-
-elif strat_type == 'dl_model':
-    # --- 新增分支 ---
-    from quant_core.strategies.dl_strategy import DeepLearningStrategy
-    
-    dl_params = strat_conf.get('dl_params', {})
-    
-    strategy = DeepLearningStrategy(
-        name=common_conf.get('name'),
-        top_k=common_conf.get('top_k'),
-        model_path=dl_params.get('model_path'),
-        feature_cols=dl_params.get('feature_list'),
-        # 注入通用风控参数
-        stop_loss_pct=risk_conf.get('stop_loss_pct'),
-        max_pos_weight=risk_conf.get('max_pos_weight')
-    )
-    
-    # 别忘了加载因子数据 (如果模型需要的话)
-    strategy.load_data(factor_data)
-
-# ... 后续代码 ...
-
-```
+**完成！** 直接运行 `python run_backtest.py` 即可。工厂会自动识别并加载你的新策略。
 
 ---
 
@@ -235,7 +213,7 @@ python run_backtest.py
 ```
 
 
-*程序将自动读取配置、加载因子、跑完回测并保存结果图表。*
+*程序将自动读取配置、通过工厂创建策略、自动加载所需因子、跑完回测并保存结果图表。*
 
 ### 场景二：实盘/模拟盘交易 (Live Trading)
 
