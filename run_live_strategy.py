@@ -3,16 +3,25 @@ import numpy as np
 import math
 import time
 from datetime import datetime
+import traceback
 
-# 引入你的模块
+# --- 引入项目模块 ---
 from quant_core.live.trader import LiveTrader
 from quant_core.live.data_bridge import LiveDataBridge
 from quant_core.strategies.rules import LinearWeightedStrategy
 
-# --- 1. 配置区域 ---
-UNIVERSE_PATH = 'data/reference/sec_code_category_grouped.csv'
+# --- [新增] 引入工具模块 ---
+# (请确保 quant_core/utils/__init__.py 存在)
+from quant_core.utils.logger import setup_logger
+from quant_core.utils.notifier import Notifier
 
-# 策略配置 (请确保这里的因子名在 LiveDataBridge 里已经写了计算公式)
+# ==============================================================================
+# 1. 配置区域 (Configuration)
+# ==============================================================================
+UNIVERSE_PATH = 'data/reference/sec_code_category_grouped.csv'
+CONFIG_PATH = 'config.yaml' # 包含邮件配置的yaml路径
+
+# 策略配置
 STRATEGY_CONFIG = {
     'name': 'Live_MultiFactor_v1',
     'weights': {
@@ -20,19 +29,28 @@ STRATEGY_CONFIG = {
         'rsi': 0.4
     },
     'top_k': 3,
-    # 风控参数
-    'stop_loss_pct': 0.05,       # 个股跌 5% 止损
-    'max_pos_weight': 0.3,       # 单票最多买 30%
-    'max_drawdown_pct': 0.15     # 账户回撤 15% 熔断
+    'stop_loss_pct': 0.05,
+    'max_pos_weight': 0.3,
+    'max_drawdown_pct': 0.15
 }
+
+# 初始化全局工具 (Logger & Notifier)
+# Logger 会自动写入 logs/live_trading_YYYY-MM-DD.log
+logger = setup_logger(name='live_strategy')
+notifier = Notifier(config_path=CONFIG_PATH)
+
+# ==============================================================================
+# 2. 辅助函数 (Helpers)
+# ==============================================================================
 
 def weight_to_quantity(target_weights: dict, current_prices: pd.Series, total_equity: float) -> dict:
     """
     [核心逻辑] 将 目标权重(%) 转换为 目标股数(Share)
     """
     target_qtys = {}
+    logger.info(f"💰 资金分配计算 (总权益: ${total_equity:,.2f})...")
     
-    print(f"\n💰 资金分配 (总权益: ${total_equity:,.2f}):")
+    log_details = [] # 用于邮件内容
     
     for code, weight in target_weights.items():
         if weight == 0:
@@ -41,41 +59,29 @@ def weight_to_quantity(target_weights: dict, current_prices: pd.Series, total_eq
             
         price = current_prices.get(code)
         if not price or pd.isna(price) or price <= 0:
-            print(f"⚠️ 跳过 {code}: 无法获取有效价格 ({price})")
+            logger.warning(f"⚠️ 跳过 {code}: 无法获取有效价格 ({price})")
             continue
             
-        # 1. 计算目标金额
         target_value = total_equity * weight
-        
-        # 2. 计算股数 (向下取整，保守处理)
-        # 例如: 打算买 $1000，股价 $300 -> 买 3 股 ($900)，而不是 4 股 ($1200)
         qty = math.floor(target_value / price)
-        
         target_qtys[code] = int(qty)
-        print(f"  - {code}: 权重 {weight:.1%} | 价格 ${price:.2f} -> 目标金额 ${target_value:.0f} -> 股数 {qty}")
         
-    return target_qtys
+        info_str = f"  - {code}: 权重 {weight:.1%} | 价格 ${price:.2f} -> 目标 ${target_value:.0f} -> 股数 {qty}"
+        logger.info(info_str)
+        log_details.append(info_str)
+        
+    return target_qtys, "\n".join(log_details)
 
 def build_portfolio_state(connector):
-    """
-    构建策略所需的 portfolio_state 字典
-    包含: total_equity, positions, avg_costs
-    """
-    # 获取账户摘要
+    """构建策略所需的 portfolio_state 字典"""
     summary = connector.ib.accountSummary()
-    # 提取总权益 (NetLiquidation)
     total_equity = float(next((x.value for x in summary if x.tag == 'NetLiquidation'), 0))
     
-    # 获取持仓详情 (包含均价)
     ib_positions = connector.ib.positions()
-    
     positions = {}
     avg_costs = {}
     
     for p in ib_positions:
-        # p.contract.localSymbol 通常是美股代码 'SPY'
-        # 注意：如果你的策略用的是 'SPY.P'，这里可能需要反向映射。
-        # 为了简单，这里假设策略产生的信号已经 strip 掉了后缀，或者 bridge 处理了一致性。
         symbol = p.contract.localSymbol 
         positions[symbol] = p.position
         avg_costs[symbol] = p.avgCost
@@ -86,118 +92,130 @@ def build_portfolio_state(connector):
         'avg_costs': avg_costs
     }
 
+# ==============================================================================
+# 3. 主程序 (Main Execution Flow)
+# ==============================================================================
+
 def main():
-    print(f"🚀 [{datetime.now()}] 启动实盘策略执行脚本...")
+    start_time = datetime.now()
+    logger.info(f"🚀 启动实盘策略执行脚本...")
     
-    # 1. 初始化模块
-    trader = LiveTrader()
-    trader.start() # 连接 IB
-    
-    # 等待连接
-    time.sleep(2)
-    if not trader.connector.ib.isConnected():
-        print("❌ 无法连接到 IB，脚本终止。")
-        return
-
-    bridge = LiveDataBridge(trader.connector, UNIVERSE_PATH)
-    
-    strategy = LinearWeightedStrategy(
-        name=STRATEGY_CONFIG['name'],
-        weights=STRATEGY_CONFIG['weights'],
-        top_k=STRATEGY_CONFIG['top_k'],
-        stop_loss_pct=STRATEGY_CONFIG['stop_loss_pct'],
-        max_pos_weight=STRATEGY_CONFIG['max_pos_weight'],
-        max_drawdown_pct=STRATEGY_CONFIG['max_drawdown_pct']
-    )
-
+    trader = None
     try:
-        # --- Step 1: 准备数据 ---
-        required_factors = list(STRATEGY_CONFIG['weights'].keys())
-        today_str = datetime.now().strftime('%Y-%m-%d') # 获取今日日期字符串
+        # --- Step 0: 初始化与连接 ---
+        trader = LiveTrader()
+        trader.start()
         
-        # 获取数据 (Index=Code, Columns=Factors)
+        time.sleep(2)
+        if not trader.connector.ib.isConnected():
+            raise ConnectionError("无法连接到 IB TWS/Gateway，请检查软件是否开启 (Port 7497/7496)")
+
+        bridge = LiveDataBridge(trader.connector, UNIVERSE_PATH)
+        
+        # --- Step 1: 准备数据 ---
+        logger.info("⚡ [Data] 正在获取历史数据并计算因子 (Lookback: 365)...")
+        
+        required_factors = list(STRATEGY_CONFIG['weights'].keys())
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
         factor_df, current_prices = bridge.prepare_data_for_strategy(
             required_factors, 
-            lookback_window=365, # 保持 365 以确保足够的预热
+            lookback_window=365,
             bar_size='1 day'
         )
         
         if factor_df.empty:
-            print("⚠️ 未获取到有效因子数据，跳过本次执行。")
+            logger.warning("⚠️ 未获取到有效因子数据，跳过本次执行。")
             return
 
-        # [🔍 调试打印] 看看因子到底算出来没？
-        print(f"\n🔍 因子快照 (前3行): \n{factor_df.head(3)}")
-        print(f"   包含 NaN? {factor_df.isnull().values.any()}")
-
-        # ==============================================================================
-        # [关键修复] 升维处理：构建 MultiIndex (Date, Code) 以适配 BaseStrategy
-        # ==============================================================================
-        # 1. 此时 factor_df 的 Index 是股票代码 (如 'SPY', 'AAPL')
-        factor_df.index.name = 'sec_code' 
-        factor_df = factor_df.reset_index() # 将 sec_code 变成一列
+        # 调试信息记录
+        logger.info(f"🔍 因子快照 (前3行): \n{factor_df.head(3)}")
         
-        # 2. 加上日期列
-        factor_df['date'] = today_str 
-        
-        # 3. 重新设置为双重索引 (Date, sec_code)
+        # [关键修复] 构建 MultiIndex (Date, Code)
+        factor_df.index.name = 'sec_code'
+        factor_df = factor_df.reset_index()
+        factor_df['date'] = today_str
         factor_df = factor_df.set_index(['date', 'sec_code'])
-        # ==============================================================================
 
-        # 注入数据到策略 (此时结构已符合策略预期)
+        # --- Step 2: 策略计算 ---
+        strategy = LinearWeightedStrategy(
+            name=STRATEGY_CONFIG['name'],
+            weights=STRATEGY_CONFIG['weights'],
+            top_k=STRATEGY_CONFIG['top_k'],
+            stop_loss_pct=STRATEGY_CONFIG['stop_loss_pct'],
+            max_pos_weight=STRATEGY_CONFIG['max_pos_weight'],
+            max_drawdown_pct=STRATEGY_CONFIG['max_drawdown_pct']
+        )
         strategy.load_data(factor_df, price_df=None)
 
-        # --- Step 2: 获取当前账户状态 ---
         portfolio_state = build_portfolio_state(trader.connector)
         total_equity = portfolio_state['total_equity']
-        print(f"\n📊 当前账户净值: ${total_equity:,.2f}")
+        logger.info(f"📊 当前账户净值: ${total_equity:,.2f}")
 
-        # --- Step 3: 运行策略逻辑 (On Bar) ---
-        # 注意：这里传入的 universe_codes 必须是纯代码列表
-        # factor_df 现在是 MultiIndex，我们需要提取 Level 1 (sec_code)
         universe_codes = factor_df.index.get_level_values('sec_code').unique().tolist()
         
-        # 调用策略
+        # 运行 On Bar
         target_weights = strategy.on_bar(
-            date=today_str, # 必须和上面 factor_df['date'] 一致
+            date=today_str,
             universe_codes=universe_codes,
             portfolio_state=portfolio_state,
             current_prices=current_prices
         )
-        
-        # [🔍 调试打印] 看看策略算出的权重
-        print(f"🎯 策略输出目标权重: {target_weights}")
+        logger.info(f"🎯 策略输出目标权重: {target_weights}")
 
+        # --- Step 3: 交易执行与汇报 ---
         if not target_weights and not portfolio_state['positions']:
-            print("😴 策略无信号且空仓，无操作。")
+            logger.info("😴 策略无信号且空仓，无操作。")
+            notifier.send(f"实盘报告 {today_str}", f"执行完毕。当前净值: ${total_equity:,.2f}\n无交易信号。")
         else:
-            # --- Step 4: 执行交易 ---
-            # [修复点 1] 清洗价格字典的 Key (从 'IAGG.B' -> 'IAGG')
-            clean_prices = {}
-            for k, v in current_prices.items():
-                short_sym = k.split('.')[0]
-                clean_prices[short_sym] = v
+            # 清洗 Key (去后缀)
+            clean_prices = {k.split('.')[0]: v for k, v in current_prices.items()}
+            clean_target_weights = {k.split('.')[0]: v for k, v in target_weights.items()}
             
-            # [修复点 2] 清洗目标权重的 Key (从 'IAGG.B' -> 'IAGG')
-            clean_target_weights = {}
-            for code, w in target_weights.items():
-                symbol = code.split('.')[0] # 去掉后缀
-                clean_target_weights[symbol] = w
+            # 计算股数
+            target_quantities, calc_details = weight_to_quantity(clean_target_weights, clean_prices, total_equity)
             
-            # 现在两个字典的 Key 都是 'IAGG', 'DBA' 了，可以匹配上了
-            target_quantities = weight_to_quantity(clean_target_weights, clean_prices, total_equity)
-            
-            # 发送给 Trader 执行
+            # 发送订单
+            logger.info("🔄 开始执行调仓...")
             trader.execute_rebalance(target_quantities)
+            
+            # [新增] 简易的订单确认 (等待 3 秒给 IB 处理)
+            time.sleep(3)
+            # [修复] 使用 openTrades()，因为它同时包含 Order 和 Contract 信息
+            open_trades = trader.connector.ib.openTrades() 
+            
+            open_order_str = "\n".join([
+                f"- {t.order.action} {t.order.totalQuantity} {t.contract.localSymbol} ({t.order.orderType}) | 状态: {t.orderStatus.status}" 
+                for t in open_trades
+            ])
+            if not open_order_str:
+                status_msg = "所有订单已成交 (或无挂单)。"
+            else:
+                status_msg = f"当前挂单 (Waiting):\n{open_order_str}"
+            
+            # 发送邮件通知
+            email_body = (
+                f"【实盘执行成功】\n"
+                f"时间: {start_time}\n"
+                f"账户净值: ${total_equity:,.2f}\n\n"
+                f"--- 目标持仓计算 ---\n{calc_details}\n\n"
+                f"--- 订单状态 ---\n{status_msg}"
+            )
+            notifier.send(f"实盘交易报告 {today_str}", email_body)
+            logger.info("✅ 交易执行完毕，通知已发送。")
 
     except Exception as e:
-        print(f"❌ 运行出错: {e}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"❌ 实盘运行出错: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        
+        # 发送报错通知
+        notifier.send(f"【紧急】实盘报错 {datetime.now().strftime('%H:%M')}", f"{error_msg}\n\n{traceback.format_exc()}")
         
     finally:
-        print("\n👋 执行结束，断开连接。")
-        trader.stop()
+        logger.info("👋 脚本退出，断开连接。")
+        if trader:
+            trader.stop()
 
 if __name__ == "__main__":
     main()

@@ -31,3 +31,16 @@ strategy:
       stop_loss_pct: 0.10      # 止损: 单笔亏损 10% 卖出 (设为 null 则关闭)
       max_pos_weight: 0.30     # 限仓: 单票最大 30% 仓位 (设为 null 则关闭)
       max_drawdown_pct: 0.20   # 熔断: 账户回撤 20% 清仓 (设为 null 则关闭)
+
+# --- 新增：通知服务配置 ---
+notifications:
+  email:
+    enabled: true
+    # 发件人配置 (建议使用 Gmail 或 Outlook 个人号，开启 App Password)
+    smtp_server: "smtp.gmail.com"  # 如果用 Gmail
+    smtp_port: 587
+    sender_email: "wangyidong020321@gmail.com" # 你的发件机器人邮箱
+    sender_password: "mzrw iubx oxub efmq"     # 注意：这里填的是“应用专用密码”，不是登录密码！
+    
+    # 收件人配置
+    receiver_email: "e1349995@u.nus.edu"       # 你的接收邮箱
