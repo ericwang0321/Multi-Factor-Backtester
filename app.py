@@ -110,17 +110,50 @@ def render_live_dashboard():
         st.error(f"Error reading state file: {e}")
         return
 
+    # [NEW] 心跳检测逻辑 (Heartbeat Check)
+    # ---------------------------------------------------------
+    updated_at_str = state.get('updated_at')
+    raw_status = state.get('status', 'Unknown')
+    
+    is_offline = False
+    time_diff_sec = 0
+    
+    if updated_at_str:
+        try:
+            last_update_dt = datetime.strptime(updated_at_str, '%Y-%m-%d %H:%M:%S')
+            time_diff_sec = (datetime.now() - last_update_dt).total_seconds()
+            
+            # 如果超过 10 秒没有心跳，视为离线
+            if time_diff_sec > 10:
+                is_offline = True
+        except ValueError:
+            is_offline = True # 时间格式错误也视为离线
+    else:
+        is_offline = True # 没有时间戳视为离线
+
+    # 决定最终显示的 Status 和 颜色
+    if is_offline:
+        display_status = "OFFLINE (No Heartbeat)"
+        status_color = "red"
+        st.error(f"⚠️ **CONNECTION LOST**: Backend has not updated for {int(time_diff_sec)} seconds. Check your terminal!")
+    else:
+        display_status = raw_status
+        # 如果是 Connected, Monitoring, Running (Auto) 则显示绿色
+        if raw_status in ["Connected", "Monitoring", "Running (Auto)"]:
+            status_color = "green"
+        else:
+            status_color = "orange"
+    # ---------------------------------------------------------
+
     # 2. 顶部 HUD (Heads-Up Display)
     acct = state.get('account', {})
-    status = state.get('status', 'Unknown')
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         # 状态指示灯
-        color = "green" if status in ["Connected", "Monitoring"] else "red"
-        st.markdown(f"### Status: :{color}[{status}]")
-        st.caption(f"Last Update: {state.get('updated_at', '--')}")
+        st.markdown(f"### Status: :{status_color}[{display_status}]")
+        st.caption(f"Last Update: {state.get('updated_at', '--')} (Next: {state.get('next_run', '--')})")
 
     with col2:
         equity = acct.get('total_equity', 0)
@@ -131,15 +164,17 @@ def render_live_dashboard():
         st.metric("Unrealized PnL", f"${pnl:,.2f}", delta=f"{pnl:,.2f}")
 
     with col4:
-        # 控制台
+        # 控制台 (禁用按钮如果离线)
         st.markdown("**Emergency Control**")
         c_stop, c_flat, c_cancel = st.columns(3)
-        if c_stop.button("🛑 STOP", type="primary", use_container_width=True):
+        
+        # 按钮逻辑：如果离线，理论上命令发出去也没人收，但我们还是允许点，以防万一
+        if c_stop.button("🛑 STOP", type="primary", use_container_width=True, disabled=False):
             with open(COMMAND_FILE, 'w') as f:
                 json.dump({"action": "STOP"}, f)
             st.toast("🚨 STOP Command Sent!", icon="🛑")
             
-        if c_flat.button("📉 FLAT", type="secondary", use_container_width=True):
+        if c_flat.button("📉 FLAT", type="secondary", use_container_width=True, disabled=False):
             with open(COMMAND_FILE, 'w') as f:
                 json.dump({"action": "FLAT_ALL"}, f)
             st.toast("📉 FLAT ALL Command Sent!", icon="📉")

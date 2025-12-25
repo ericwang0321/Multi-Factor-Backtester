@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import datetime
 from pytz import timezone
 
-# 引入调度器 (需要 pip install apscheduler)
+# 引入调度器
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -54,9 +54,7 @@ async def job_trading_session():
         # 1. 确保连接健康
         if not trader or not trader.connector.ib.isConnected():
             logger.warning("⚠️ IB 未连接，尝试重连...")
-            # 尝试重新连接 (ib_insync 的 connect 是同步的，这里在 async 环境下需要小心)
-            # 简单起见，我们假设 daemon 启动时已经连好了，这里只做简单的检查
-            # 如果断开了，通常会在心跳任务里尝试重连
+            # 这里的重连机制依赖于 IB 客户端自身的自动重连，或者可以在此添加显式重连逻辑
             return
 
         # 2. 策略实例化
@@ -67,8 +65,6 @@ async def job_trading_session():
         logger.info("📡 正在拉取 IB 历史数据...")
         required_factors = strategy.get_required_factors()
         
-        # 注意：bridge.prepare_data_for_strategy 内部是同步阻塞的
-        # 在高并发场景下应该放到 executor 里跑，但对于单策略实盘，直接跑也无妨
         factor_df, current_prices = bridge.prepare_data_for_strategy(
             required_factors, lookback_window=365
         )
@@ -109,7 +105,6 @@ async def job_trading_session():
             
             if target_qtys:
                 logger.info(f"🔄 执行调仓: {target_qtys}")
-                # execute_rebalance 是同步的
                 trader.execute_rebalance(target_qtys)
                 notifier.send("交易完成", f"已发送订单至 TWS。\n{details}")
             else:
@@ -128,14 +123,14 @@ async def job_heartbeat():
     【心跳任务】每 5 秒运行一次
     负责：处理前端指令 -> 更新状态文件 -> 维持连接
     """
-    # 1. 处理前端指令 (STOP/FLAT/CANCEL)
+    # 1. 检查指令
     check_remote_commands(trader)
     
-    # 2. 更新状态文件 (Dashboard State)
+    # 2. 更新状态 (证明我还活着)
     if trader and trader.connector.ib.isConnected():
         state = build_portfolio_state(trader.connector)
         
-        # 增加一些调度器信息给前端看
+        # 写入正在运行的状态
         state['status'] = "Running (Auto)"
         try:
             next_run = scheduler.get_job('daily_trading').next_run_time
@@ -145,17 +140,21 @@ async def job_heartbeat():
             
         save_dashboard_state(state)
     else:
-        # 如果断连，记录状态
+        # 断连状态
         save_dashboard_state({'status': 'Disconnected', 'error': 'IB connection lost'})
-        # (可选) 这里可以加重连逻辑，但 ib_insync 通常会自动重连
 
 # ==============================================================================
-# 2. 辅助函数 (Helpers) - 直接复用
+# 2. 辅助函数 (Helpers)
 # ==============================================================================
 
 def save_dashboard_state(state_data):
+    """
+    原子写入状态文件
+    """
     try:
+        # 统一添加最后更新时间 (这是 app.py 判断是否离线的依据)
         state_data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         temp_file = STATE_FILE + '.tmp'
         with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(state_data, f, ensure_ascii=False, indent=2)
@@ -173,15 +172,18 @@ def check_remote_commands(trader_instance):
         notifier.send("收到指令", f"正在执行: {action}")
         
         if action == 'STOP':
-            logger.warning("🛑 停止指令已接收，退出进程。")
+            # 这里抛出 SystemExit，会被 main_loop 的异常捕获处理，从而执行“遗言”逻辑
+            logger.warning("🛑 停止指令已接收...")
             sys.exit(0)
         elif action == 'CANCEL_ALL':
             trader_instance.cancel_all_orders()
         elif action == 'FLAT_ALL':
-            # 需在 trader 中实现 close_all
             notifier.send("警告", "一键清仓功能暂未实装，请手动平仓。")
             
-    except Exception as e: logger.error(f"指令处理失败: {e}")
+    except SystemExit:
+        raise # 重新抛出退出信号
+    except Exception as e: 
+        logger.error(f"指令处理失败: {e}")
 
 def weight_to_quantity(weights, prices, equity):
     qtys = {}
@@ -206,23 +208,20 @@ def build_portfolio_state(connector):
     return {'total_equity': total_equity, 'unrealized_pnl': pnl, 'positions': positions, 'avg_costs': costs}
 
 # ==============================================================================
-# 3. 异步启动入口 (Main Entry)
+# 3. 异步启动入口 (Main Entry) - 包含“遗言”逻辑
 # ==============================================================================
 
 async def main_loop():
     global trader, scheduler
     
-    # --- 1. 初始化交易连接 ---
+    # --- 1. 初始化 ---
     trader = LiveTrader()
     port = CONF['ib_connection'].get('port', 7497) 
     trader.connector.port = port
     
     logger.info(f"🚀 正在连接 IB Gateway (Port: {port})...")
-    
-    # 这里的 start() 内部是同步连接，会阻塞一下
     trader.start() 
     
-    # 等待连接稳定
     for _ in range(5):
         if trader.connector.ib.isConnected(): break
         await asyncio.sleep(1)
@@ -234,44 +233,61 @@ async def main_loop():
     logger.info("✅ IB 连接成功，系统已就绪。")
     notifier.send("守护进程启动", f"实盘系统已上线 (PID: {os.getpid()})")
 
-    # --- 2. 初始化调度器 (Scheduler) ---
-    # 强制使用美东时区，无论服务器在哪
+    # --- 2. 调度器 ---
     ny_tz = timezone('America/New_York')
     scheduler = AsyncIOScheduler(timezone=ny_tz)
     
-    # [任务 A] 交易任务：周一至周五，09:30 AM (美东时间)
     scheduler.add_job(
         job_trading_session, 
         CronTrigger(day_of_week='mon-fri', hour=9, minute=30, timezone=ny_tz),
         id='daily_trading'
     )
-    
-    # [任务 B] 心跳任务：每 5 秒一次
     scheduler.add_job(job_heartbeat, 'interval', seconds=5, id='heartbeat')
-    
-    # 启动调度
     scheduler.start()
     
-    # 打印下次运行时间，方便核对
     try:
         next_run = scheduler.get_job('daily_trading').next_run_time
         logger.info(f"📅 下次交易时间: {next_run} (Timezone: America/New_York)")
         logger.info("👁️ 进入后台监控模式 (按 Ctrl+C 退出)...")
-    except Exception as e:
-        logger.warning(f"无法获取下次运行时间: {e}")
+    except: pass
 
-    # --- 3. 永久阻塞主线程 (Event Loop) ---
+    # --- 3. 守护循环与异常处理 (Robustness Layer) ---
     try:
         while True:
             await asyncio.sleep(1)
+            
     except (KeyboardInterrupt, SystemExit):
-        logger.info("👋 进程正在停止...")
-        trader.stop()
-        notifier.send("守护进程停止", "用户手动停止了系统。")
+        # [Case 1] 正常退出 (手动 Ctrl+C 或 网页点 STOP)
+        logger.warning("👋 正在执行安全停机流程...")
+        
+        # 写遗言：把状态改成 Stopped
+        save_dashboard_state({
+            "status": "Stopped", 
+            "info": "User manually stopped the service."
+        })
+        notifier.send("🔴 系统下线", "用户手动停止了守护进程。")
+        
+    except Exception as e:
+        # [Case 2] 意外崩溃
+        err_msg = traceback.format_exc()
+        logger.error(f"☠️ 严重错误导致崩溃: {e}\n{err_msg}")
+        
+        # 写遗言：把状态改成 Crashed
+        save_dashboard_state({
+            "status": "Crashed", 
+            "error": str(e)
+        })
+        notifier.send("☠️ 系统崩溃", f"守护进程意外退出！\n错误: {str(e)}")
+        
+    finally:
+        # 无论如何都要关闭连接
+        if trader:
+            trader.stop()
+        logger.info("✅ 进程已彻底结束。")
 
 if __name__ == '__main__':
     try:
-        # 运行异步主循环
         asyncio.run(main_loop())
     except KeyboardInterrupt:
+        # 这里捕获是为了防止 asyncio.run 抛出的额外报错信息干扰视线
         pass
