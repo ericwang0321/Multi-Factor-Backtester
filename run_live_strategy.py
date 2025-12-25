@@ -6,8 +6,11 @@ import json
 import math
 import traceback
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pytz import timezone
+
+# [新增] 引入市场日历库 (pip install pandas_market_calendars)
+import pandas_market_calendars as mcal
 
 # 引入调度器
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -39,30 +42,78 @@ trader = None
 scheduler = None
 
 # ==============================================================================
+# 0. 市场日历检查工具 (Helpers)
+# ==============================================================================
+
+def check_is_market_open():
+    """
+    检查今天是否是美股交易日 (NYSE)
+    返回: (bool, str) -> (是否开盘, 原因/描述)
+    """
+    # 获取纽约时间
+    ny_tz = timezone('America/New_York')
+    now_ny = datetime.now(ny_tz)
+    today_str = now_ny.strftime('%Y-%m-%d')
+    
+    # 获取 NYSE 日历
+    nyse = mcal.get_calendar('NYSE')
+    
+    # 检查今天是否有安排
+    schedule = nyse.schedule(start_date=today_str, end_date=today_str)
+    
+    if schedule.empty:
+        return False, f"Holiday/Weekend ({today_str})"
+    
+    # 额外检查：如果是提前休市 (Early Close)，也视为交易日，但可以记录一下
+    return True, "Market Open"
+
+# ==============================================================================
 # 1. 核心任务逻辑 (Tasks)
 # ==============================================================================
 
 async def job_trading_session():
     """
-    【交易任务】每天美东时间 09:30 触发
-    负责：连接检查 -> 数据拉取 -> 策略计算 -> 下单 -> 推送通知
+    【交易任务】每天美东时间 09:15 触发 (盘前准备)
+    逻辑：
+    1. 检查是不是假期 -> 2. 拉取截至昨日的数据 -> 3. 算号 -> 4. 挂单 (TWS会自动等到09:30成交)
     """
-    logger.info("⏰ [Scheduler] 触发每日定时交易任务...")
-    notifier.send("实盘启动", "正在执行每日定投策略逻辑...")
+    logger.info("⏰ [Scheduler] 触发每日定时任务...")
+    
+    # --- Step 1: 节假日检查 ---
+    is_open, reason = check_is_market_open()
+    if not is_open:
+        logger.info(f"☕️ 今天美股休市: {reason}，任务跳过。")
+        # 更新一下状态文件，告诉前端我醒过，但是没干活
+        save_dashboard_state({
+            "status": "Sleeping (Holiday)",
+            "info": f"Market Closed: {reason}"
+        })
+        return
+
+    notifier.send("实盘启动", f"正在执行每日策略逻辑 (盘前准备)...\n市场状态: {reason}")
     
     try:
         # 1. 确保连接健康
         if not trader or not trader.connector.ib.isConnected():
             logger.warning("⚠️ IB 未连接，尝试重连...")
-            # 这里的重连机制依赖于 IB 客户端自身的自动重连，或者可以在此添加显式重连逻辑
-            return
+            # 简单重连尝试
+            try:
+                if trader: trader.start()
+            except: pass
+            
+            # 如果还连不上，报错退出
+            await asyncio.sleep(5)
+            if not trader or not trader.connector.ib.isConnected():
+                notifier.send("连接失败", "IB TWS 未连接，无法交易。")
+                return
 
         # 2. 策略实例化
         strategy = create_strategy_instance(CONF['strategy'])
         bridge = LiveDataBridge(trader.connector, CONF['universe_path'])
         
         # 3. 数据准备 (Data Pulling)
-        logger.info("📡 正在拉取 IB 历史数据...")
+        # 注意：在 09:15 拉取数据时，IB 会返回截止到昨天收盘的日线数据
+        logger.info("📡 正在拉取 IB 历史数据 (截至昨日收盘)...")
         required_factors = strategy.get_required_factors()
         
         factor_df, current_prices = bridge.prepare_data_for_strategy(
@@ -89,6 +140,8 @@ async def job_trading_session():
         # 6. 运行策略计算 (Core Logic)
         logger.info("🧠 正在计算策略信号...")
         universe_codes = factor_df.index.get_level_values('sec_code').unique().tolist()
+        
+        # 这里计算出的 target_weights 是基于“昨天收盘价”算出的理想仓位
         target_weights = strategy.on_bar(
             date=today_str,
             universe_codes=universe_codes,
@@ -105,8 +158,12 @@ async def job_trading_session():
             
             if target_qtys:
                 logger.info(f"🔄 执行调仓: {target_qtys}")
+                
+                # [关键] 此时是 09:15，发送的是普通 Market Order。
+                # TWS 会将其状态置为 "PreSubmitted" (排队中)，直到 09:30 开盘瞬间触发。
                 trader.execute_rebalance(target_qtys)
-                notifier.send("交易完成", f"已发送订单至 TWS。\n{details}")
+                
+                notifier.send("挂单完成", f"已发送订单至 TWS (等待开盘成交)。\n{details}")
             else:
                 logger.info("⚖️ 计算后持仓无变动。")
                 notifier.send("交易跳过", "策略计算结果无持仓变动。")
@@ -130,7 +187,6 @@ async def job_heartbeat():
     if trader and trader.connector.ib.isConnected():
         state = build_portfolio_state(trader.connector)
         
-        # 写入正在运行的状态
         state['status'] = "Running (Auto)"
         try:
             next_run = scheduler.get_job('daily_trading').next_run_time
@@ -148,13 +204,9 @@ async def job_heartbeat():
 # ==============================================================================
 
 def save_dashboard_state(state_data):
-    """
-    原子写入状态文件
-    """
+    """原子写入状态文件"""
     try:
-        # 统一添加最后更新时间 (这是 app.py 判断是否离线的依据)
         state_data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
         temp_file = STATE_FILE + '.tmp'
         with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(state_data, f, ensure_ascii=False, indent=2)
@@ -172,19 +224,18 @@ def check_remote_commands(trader_instance):
         notifier.send("收到指令", f"正在执行: {action}")
         
         if action == 'STOP':
-            # 这里抛出 SystemExit，会被 main_loop 的异常捕获处理，从而执行“遗言”逻辑
             logger.warning("🛑 停止指令已接收...")
             sys.exit(0)
         elif action == 'CANCEL_ALL':
             trader_instance.cancel_all_orders()
         elif action == 'FLAT_ALL':
-            # [修改后] 真正的实装代码：
+            # 调用 Trader 的一键清仓
             logger.warning("📉 收到清仓指令，正在执行...")
             trader_instance.close_all_positions()
-            notifier.send("⚠️ 紧急清仓", "已执行一键清仓 (FLAT ALL)，所有挂单已撤销，持仓正在市价卖出。")  
-                      
+            notifier.send("⚠️ 紧急清仓", "已执行一键清仓 (FLAT ALL)，所有挂单已撤销，持仓正在市价卖出。")
+            
     except SystemExit:
-        raise # 重新抛出退出信号
+        raise
     except Exception as e: 
         logger.error(f"指令处理失败: {e}")
 
@@ -211,7 +262,7 @@ def build_portfolio_state(connector):
     return {'total_equity': total_equity, 'unrealized_pnl': pnl, 'positions': positions, 'avg_costs': costs}
 
 # ==============================================================================
-# 3. 异步启动入口 (Main Entry) - 包含“遗言”逻辑
+# 3. 异步启动入口 (Main Entry)
 # ==============================================================================
 
 async def main_loop():
@@ -236,13 +287,15 @@ async def main_loop():
     logger.info("✅ IB 连接成功，系统已就绪。")
     notifier.send("守护进程启动", f"实盘系统已上线 (PID: {os.getpid()})")
 
-    # --- 2. 调度器 ---
+    # --- 2. 调度器 (美东时间) ---
     ny_tz = timezone('America/New_York')
     scheduler = AsyncIOScheduler(timezone=ny_tz)
     
+    # [修改点] 将时间改为 09:15，实现盘前算号
     scheduler.add_job(
         job_trading_session, 
-        CronTrigger(day_of_week='mon-fri', hour=9, minute=30, timezone=ny_tz),
+        # 周一到周五触发，具体是否开盘由 job 内部的日历检查决定
+        CronTrigger(day_of_week='mon-fri', hour=9, minute=15, timezone=ny_tz),
         id='daily_trading'
     )
     scheduler.add_job(job_heartbeat, 'interval', seconds=5, id='heartbeat')
@@ -250,47 +303,32 @@ async def main_loop():
     
     try:
         next_run = scheduler.get_job('daily_trading').next_run_time
-        logger.info(f"📅 下次交易时间: {next_run} (Timezone: America/New_York)")
+        logger.info(f"📅 下次任务检查时间: {next_run} (Timezone: America/New_York)")
         logger.info("👁️ 进入后台监控模式 (按 Ctrl+C 退出)...")
     except: pass
 
-    # --- 3. 守护循环与异常处理 (Robustness Layer) ---
+    # --- 3. 守护循环 ---
     try:
         while True:
             await asyncio.sleep(1)
             
     except (KeyboardInterrupt, SystemExit):
-        # [Case 1] 正常退出 (手动 Ctrl+C 或 网页点 STOP)
         logger.warning("👋 正在执行安全停机流程...")
-        
-        # 写遗言：把状态改成 Stopped
-        save_dashboard_state({
-            "status": "Stopped", 
-            "info": "User manually stopped the service."
-        })
+        save_dashboard_state({"status": "Stopped", "info": "User manually stopped."})
         notifier.send("🔴 系统下线", "用户手动停止了守护进程。")
         
     except Exception as e:
-        # [Case 2] 意外崩溃
         err_msg = traceback.format_exc()
         logger.error(f"☠️ 严重错误导致崩溃: {e}\n{err_msg}")
-        
-        # 写遗言：把状态改成 Crashed
-        save_dashboard_state({
-            "status": "Crashed", 
-            "error": str(e)
-        })
+        save_dashboard_state({"status": "Crashed", "error": str(e)})
         notifier.send("☠️ 系统崩溃", f"守护进程意外退出！\n错误: {str(e)}")
         
     finally:
-        # 无论如何都要关闭连接
-        if trader:
-            trader.stop()
+        if trader: trader.stop()
         logger.info("✅ 进程已彻底结束。")
 
 if __name__ == '__main__':
     try:
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        # 这里捕获是为了防止 asyncio.run 抛出的额外报错信息干扰视线
         pass
