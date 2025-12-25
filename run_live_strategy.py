@@ -178,8 +178,11 @@ def check_remote_commands(trader_instance):
         elif action == 'CANCEL_ALL':
             trader_instance.cancel_all_orders()
         elif action == 'FLAT_ALL':
-            notifier.send("警告", "一键清仓功能暂未实装，请手动平仓。")
-            
+            # [修改后] 真正的实装代码：
+            logger.warning("📉 收到清仓指令，正在执行...")
+            trader_instance.close_all_positions()
+            notifier.send("⚠️ 紧急清仓", "已执行一键清仓 (FLAT ALL)，所有挂单已撤销，持仓正在市价卖出。")  
+                      
     except SystemExit:
         raise # 重新抛出退出信号
     except Exception as e: 

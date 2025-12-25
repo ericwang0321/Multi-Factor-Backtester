@@ -63,3 +63,30 @@ class LiveTrader:
         print("🚫 正在请求撤销所有订单...")
         # ib_insync 的全局撤单指令
         self.connector.ib.reqGlobalCancel()
+        
+    # =========== [新增以下方法] ===========
+    def close_all_positions(self):
+        """
+        [新增] 一键清仓：市价平掉所有持仓
+        """
+        print("\n🚨 [FLAT ALL] 正在执行一键清仓程序...")
+        
+        # 1. 第一步：必须先撤销所有挂单，防止平仓后挂单成交又买回来了
+        self.cancel_all_orders()
+        time.sleep(1) # 给 TWS 一点时间处理撤单
+        
+        # 2. 第二步：获取当前持仓
+        # 注意：这里我们不需要手动写循环卖出的逻辑，直接复用 execute_rebalance！
+        current_positions = self.connector.get_current_positions()
+        
+        if not current_positions:
+            print("✅ 当前账户为空仓，无需操作。")
+            return
+
+        print(f"当前持仓待清空: {list(current_positions.keys())}")
+
+        # 3. 第三步：传入“空字典”作为目标
+        # 逻辑：目标是 0，当前是 X，差额就是 -X (卖出所有)
+        self.execute_rebalance(target_positions={})
+        
+        print("✅ 清仓指令已全部发送，账户即将归零。")
