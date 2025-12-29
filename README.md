@@ -26,6 +26,11 @@ This project is an **industrial-grade, full-stack** quantitative trading system 
 * **Risk Control**: Built-in **2% Cash Buffer** to prevent overdrafts caused by market volatility.
 * **Hard Constraint Matching**: Real-time cash flow checks during execution. If a gap-up opening leads to insufficient funds, **Order Truncation** is automatically triggered.
 
+#### 🌍 Market Intelligence UI (New)
+
+* **Global Market Overview**: Integrated **TradingView** widgets (Ticker Tape, Sector Heatmaps) and **Finnhub** AI-curated news streams for macro analysis.
+* **Stock Deep Dive**: Professional-grade **Advanced Real-time Charts** and **Insider Sentiment Analysis** (visualized via Plotly) to track management confidence.
+
 #### 🔴 Live Cockpit
 
 * **Frontend-Backend Separation**:
@@ -73,6 +78,7 @@ graph TD
         JSON -->|Read State| App[app.py / Streamlit]
         User((Trader)) -->|Click Button| App
         App -->|Write Command| CMD
+        External[Finnhub/TradingView] -->|News & Charts| App
     end
 
 ```
@@ -92,9 +98,11 @@ graph TD
 
 
 * **`app.py`**: **[All-in-One Console]**
-* Streamlit Web Application. Includes two main modules:
-1. **Strategy Explorer**: Visualization for backtesting and factor analysis.
-2. **🔴 Live Dashboard**: Live trading monitor (reads backend state, sends commands).
+* Streamlit Web Application. Includes **four** main modules:
+1. **🔴 Live Dashboard**: Live trading monitor (reads backend state, sends commands).
+2. **🌍 Market Overview**: Global market heatmaps and real-time news aggregation.
+3. **🔍 Stock Deep Dive**: Technical charts and fundamental/sentiment analysis for individual assets.
+4. **Strategy Explorer**: Visualization for backtesting and factor analysis.
 
 
 
@@ -117,7 +125,7 @@ graph TD
 * **`base.yaml`**: Global settings (Data paths, Universe paths).
 * **`backtest.yaml`**: Backtest-specific params (Initial capital, Commission, Date range).
 * **`live.yaml`**: Live-specific params (IB port, Risk thresholds).
-* **`secrets.yaml`**: Sensitive info (Email passwords, **Ignored by Git**).
+* **`secrets.yaml`**: Sensitive info (Email passwords, Telegram tokens, **Finnhub API Keys**). **Ignored by Git**.
 
 #### 📂 quant_core (Core Library)
 
@@ -125,6 +133,8 @@ graph TD
 * **`quant_core/portfolio.py`**: Ledger managing cash, positions, and NAV. Features stateless design and hard constraints.
 * **`quant_core/strategies/`**: Strategy factory containing base classes and specific rule implementations.
 * **`quant_core/live/`**: Live trading modules including `trader.py` (Execution) and `data_bridge.py` (Data adaption).
+* **`quant_core/ui/widgets.py`**: **[UI Component Library]** Wrappers for TradingView HTML5 widgets (Advanced Chart, Ticker Tape) adapted for Streamlit.
+* **`quant_core/data/external_api.py`**: **[External Data Service]** Client for Finnhub API to fetch market news and insider sentiment.
 
 ---
 
@@ -208,6 +218,11 @@ In the **Live Dashboard**, you have three emergency buttons:
 * **资金风控**：内置 **2% 现金缓冲 (Cash Buffer)**，防止满仓波动导致透支。
 * **硬约束撮合**：执行时实时检查现金流，若遇跳空高开导致资金不足，自动执行 **Order Truncation (砍单)**。
 
+#### 🌍 市场情报系统 (Market Intelligence UI) - 新增
+
+* **全球市场概览**：集成 **TradingView** 组件（行情条、板块热力图）与 **Finnhub** AI 筛选的实时新闻流，提供宏观市场视角。
+* **个股深度分析**：提供全屏级 **高级实时 K 线图** 与 **内部交易情绪 (Insider Sentiment)** 分析（基于 Plotly 可视化管理层信心）。
+
 #### 🔴 实盘指挥舱 (Live Cockpit)
 
 * **前后端分离**：
@@ -255,6 +270,7 @@ graph TD
         JSON -->|Read State| App[app.py / Streamlit]
         User((Trader)) -->|Click Button| App
         App -->|Write Command| CMD
+        External[Finnhub/TradingView] -->|News & Charts| App
     end
 
 ```
@@ -274,9 +290,11 @@ graph TD
 
 
 * **`app.py`**: **[全能控制台]**
-* Streamlit Web 应用。包含两个核心功能：
-1. **Strategy Explorer**：可视化回测、因子分析。
-2. **🔴 Live Dashboard**：实盘监控看板（读取后台状态、发送控制指令）。
+* Streamlit Web 应用。包含**四个**核心模块：
+1. **🔴 Live Dashboard**: 实盘监控看板（读取后台状态、发送控制指令）。
+2. **🌍 Market Overview**: 全球市场热力图与实时新闻聚合。
+3. **🔍 Stock Deep Dive**: 个股技术面（K线）与基本面（情绪）深度分析。
+4. **Strategy Explorer**: 策略回测与因子分析可视化。
 
 
 
@@ -299,7 +317,7 @@ graph TD
 * **`base.yaml`**: 全局通用配置（数据路径、标的池路径）。
 * **`backtest.yaml`**: 回测专用参数（资金量、手续费、起止日期）。
 * **`live.yaml`**: 实盘专用参数（IB 端口、实盘风控阈值）。
-* **`secrets.yaml`**: 敏感信息（邮件服务器密码，**不上传 Git**）。
+* **`secrets.yaml`**: 敏感信息（邮件服务器密码，Telegram Token，**Finnhub API Keys**）。**不上传 Git**。
 
 #### 📂 quant_core (核心代码库)
 
@@ -307,6 +325,8 @@ graph TD
 * **`quant_core/portfolio.py`** (账户账本): 管理现金、持仓、计算净值。**无状态设计**（不持有全量历史数据，只处理 Engine 传入的单日价格）。实现了 **2% Cash Buffer** 和 **资金不足自动砍单**。
 * **`quant_core/strategies/`** (策略工厂): 包含 `base.py` (基类), `rules.py` (具体策略), 和 `__init__.py` (工厂函数)。
 * **`quant_core/live/`** (实盘模块): 包含 `trader.py` (交易执行) 和 `data_bridge.py` (数据桥接)。
+* **`quant_core/ui/widgets.py`**: **[UI 组件库]** 封装 TradingView HTML5 原生组件（高级 K 线、行情条），适配 Streamlit 布局。
+* **`quant_core/data/external_api.py`**: **[外部数据服务]** Finnhub API 客户端，负责获取实时新闻流与内部交易情绪数据。
 
 ---
 
