@@ -8,6 +8,7 @@ from datetime import datetime
 import sys
 import subprocess
 import time
+import plotly.express as px
 
 # --- 核心库导入 ---
 from quant_core.data.query_helper import DataQueryHelper
@@ -28,6 +29,10 @@ from quant_core.visualization.factor import FactorCharts
 from quant_core.visualization.performance import PerformanceCharts
 from quant_core.visualization.trading import TradingCharts     
 from quant_core.visualization.reporting import ReportGenerator 
+
+# --- [新增] 引入 OpenStock 风格 UI 组件与数据服务 ---
+from quant_core.ui.widgets import TradingViewWidgets
+from quant_core.data.external_api import FinnhubService
 
 # --- Page Setup ---
 st.set_page_config(page_title="Quant Cockpit & Backtester", layout="wide", page_icon="📈")
@@ -60,6 +65,15 @@ def get_factor_engine(_query_helper):
 def get_analysis_runner(_query_helper):
     return FactorTaskRunner(_query_helper)
 
+# [新增] 初始化 Finnhub 服务 (读取 secrets.yaml 中的 key)
+@st.cache_resource
+def get_finnhub_service():
+    # 为了读取 secrets，我们需要加载一次 live 或 backtest 配置（secrets 会被自动合并）
+    config = get_cached_config(mode='live')
+    # 安全获取 API Key，防止报错
+    api_key = config.get('finnhub', {}).get('api_key', None)
+    return FinnhubService(api_key)
+
 # --- Helper Functions ---
 def prepare_factor_data_for_strategy(_engine, codes, factors, start_date, end_date):
     """内存计算因子数据"""
@@ -85,7 +99,7 @@ def prepare_factor_data_for_strategy(_engine, codes, factors, start_date, end_da
     full_factor_df.index.names = ['datetime', 'sec_code']
     return full_factor_df
 
-# --- Module 1: Live Dashboard ---
+# --- Module 1: Live Dashboard (实盘看板) ---
 def render_live_dashboard():
     st.title("🔴 Live Trading Cockpit")
     
@@ -222,8 +236,118 @@ def render_live_dashboard():
 
     st.text_area("System Logs", log_content, height=300, disabled=True)
 
+# --- [修改] Module: Market Overview (OpenStock 风格) ---
+def render_market_overview():
+    st.title("🌍 Global Market Overview")
+    finnhub_service = get_finnhub_service()
+    
+    # 1. 顶部滚动行情条
+    TradingViewWidgets.render_ticker_tape()
+    
+    st.divider()
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("🔥 Market Heatmap (S&P 500)")
+        TradingViewWidgets.render_market_heatmap()
+        
+    with col2:
+        st.subheader("📰 Latest News (AI Curated)")
+        if not finnhub_service.api_key:
+            st.warning("⚠️ Finnhub API Key not found in secrets.yaml")
+        else:
+            with st.spinner("Fetching news..."):
+                news = finnhub_service.get_market_news()
+                if news:
+                    for n in news:
+                        with st.expander(f"{n.get('headline')[:50]}...", expanded=False):
+                            if n.get('image'):
+                                # [修复点 1] use_column_width -> use_container_width
+                                st.image(n.get('image'), use_container_width=True)
+                            
+                            # 格式化时间戳
+                            pub_time = datetime.fromtimestamp(n.get('datetime', time.time())).strftime('%H:%M')
+                            st.caption(f"Source: {n.get('source')} | {pub_time}")
+                            st.write(n.get('summary'))
+                            st.markdown(f"[Read full story]({n.get('url')})")
+                else:
+                    st.info("No news fetched or API limit reached.")
 
-# --- Module 2: Data Explorer ---
+# --- [修改] Module: Stock Deep Dive (个股深度分析) ---
+def render_stock_deep_dive():
+    st.title("🔍 Stock Deep Dive")
+    finnhub_service = get_finnhub_service()
+    
+    # 搜索框优化
+    col_input, col_info = st.columns([1, 3])
+    with col_input:
+        symbol = st.text_input("Symbol", "NASDAQ:AAPL")
+    with col_info:
+        st.caption("Use TradingView format (e.g., NASDAQ:TSLA, NYSE:GME)")
+    
+    # 顶部：高级 K 线图
+    st.subheader(f"Technical Chart: {symbol}")
+    TradingViewWidgets.render_advanced_chart(symbol)
+    
+    st.divider()
+    
+    # 底部：基本面 + 情绪
+    c1, c2 = st.columns([1, 1]) # 左右等宽
+    with c1:
+        st.subheader("🏢 Company Profile")
+        TradingViewWidgets.render_company_profile(symbol)
+    
+    with c2:
+        st.subheader("🧠 Insider Sentiment")
+        st.caption("Monthly Management Sentiment (MSPR). Positive = Net Buying, Negative = Net Selling.")
+        
+        if not finnhub_service.api_key:
+            st.warning("⚠️ Finnhub API Key required.")
+        else:
+            df_sentiment = finnhub_service.get_company_sentiment(symbol)
+            if not df_sentiment.empty:
+                try:
+                    # [数据清洗]
+                    # 1. 构造日期列 (YYYY-MM)
+                    df_sentiment['period'] = df_sentiment.apply(
+                        lambda x: f"{int(x['year'])}-{int(x['month']):02d}", axis=1
+                    )
+                    # 2. 按时间正序排列
+                    df_sentiment = df_sentiment.sort_values('period')
+                    
+                    # 3. 定义颜色：大于0为绿色，小于0为红色
+                    df_sentiment['color'] = df_sentiment['MSPR (Monthly)'].apply(lambda x: '#00C853' if x >= 0 else '#FF3D00')
+                    
+                    # [绘图] 使用 Plotly 画出漂亮的柱状图
+                    fig = px.bar(
+                        df_sentiment, 
+                        x='period', 
+                        y='MSPR (Monthly)',
+                        title=f"{symbol.split(':')[-1]} Insider Confidence",
+                        labels={'period': 'Month', 'MSPR (Monthly)': 'Sentiment Score'}
+                    )
+                    
+                    # 应用自定义颜色
+                    fig.update_traces(marker_color=df_sentiment['color'])
+                    
+                    # 优化布局
+                    fig.update_layout(
+                        xaxis_type='category', # 强制横轴为类别，不显示 2,024.5
+                        showlegend=False,
+                        height=450,
+                        margin=dict(l=20, r=20, t=40, b=20)
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                except Exception as e:
+                    st.error(f"Error processing sentiment data: {e}")
+                    st.dataframe(df_sentiment) # 出错时降级显示表格
+            else:
+                st.info("No insider sentiment data available for this symbol.")
+
+# --- Module 2: Data Explorer (原版) ---
 def render_data_explorer():
     st.header("Data Warehouse Explorer (Parquet)")
     helper = get_query_helper()
@@ -259,7 +383,7 @@ def render_data_explorer():
             with t2: 
                 st.dataframe(df.sort_values('datetime', ascending=False), use_container_width=True)
 
-# --- Module 3: Analysis Explorer ---
+# --- Module 3: Analysis Explorer (原版) ---
 def render_analysis_explorer(helper):
     st.header("Factor Analysis Explorer")
     runner = get_analysis_runner(helper)
@@ -304,7 +428,9 @@ def render_analysis_explorer(helper):
 with st.sidebar:
     st.header("Navigation")
     app_mode = st.radio("Choose Module", [
-        "🔴 Live Dashboard", 
+        "🔴 Live Dashboard",
+        "🌍 Market Overview",  # [新增]
+        "🔍 Stock Deep Dive",  # [新增]
         "Strategy Explorer", 
         "Data Explorer", 
         "Analysis Explorer"
@@ -370,10 +496,16 @@ with st.sidebar:
 # --- Main Routing ---
 if app_mode == "🔴 Live Dashboard":
     render_live_dashboard()
-    # 自动刷新逻辑
     if auto_refresh:
         time.sleep(3)
         st.rerun()
+
+# [新增] 路由分支
+elif app_mode == "🌍 Market Overview":
+    render_market_overview()
+
+elif app_mode == "🔍 Stock Deep Dive":
+    render_stock_deep_dive()
 
 elif app_mode == "Data Explorer": 
     render_data_explorer()
