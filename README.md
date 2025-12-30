@@ -1,10 +1,22 @@
-# 📈 Quantitative Multi-Factor System
+# Quantitative Multi-Factor System
 
-[English](https://www.google.com/search?q=%23-english) | [中文](https://www.google.com/search?q=%23-%E4%B8%AD%E6%96%87)
+<div align="center">
+
+[English](https://www.google.com/search?q=%23english) | [中文](https://www.google.com/search?q=%23chinese)
+
+</div>
 
 ---
 
+<div id="english"></div>
+
 ## English
+
+### Project Showcase
+
+Explore the system's architecture and live trading workflow. This video demonstrates how the framework connects to Interactive Brokers and manages the full trading lifecycle.
+
+> *Click the image above to watch the full walkthrough on YouTube.*
 
 ### 1. Project Vision
 
@@ -20,28 +32,31 @@ This project is an **industrial-grade, full-stack** quantitative trading system 
 
 ### 2. Key Features
 
-#### 📊 Backtest Engine V5
+#### Backtest Engine V5
 
 * **Dual-Price Mechanism**: Simulates decision-making at T-1 Close (determining target shares) and execution at T Open (calculating cash flow).
 * **Risk Control**: Built-in **2% Cash Buffer** to prevent overdrafts caused by market volatility.
 * **Hard Constraint Matching**: Real-time cash flow checks during execution. If a gap-up opening leads to insufficient funds, **Order Truncation** is automatically triggered.
 
-#### 🌍 Market Intelligence UI (New)
+#### Market Intelligence UI
 
 * **Global Market Overview**: Integrated **TradingView** widgets (Ticker Tape, Sector Heatmaps) and **Finnhub** AI-curated news streams for macro analysis.
-* **Stock Deep Dive**: Professional-grade **Advanced Real-time Charts** and **Insider Sentiment Analysis** (visualized via Plotly) to track management confidence.
+<img src="images/market_overview.png" alt="Global Market Overview Dashboard" width="800"/>
+* **Stock Deep Dive**: Professional-grade Advanced Real-time Charts and Insider Sentiment Analysis (visualized via Plotly) to track management confidence.
 
-#### 🔴 Live Cockpit
+#### Live Cockpit
 
 * **Frontend-Backend Separation**:
 * **Backend (Worker)**: `run_live_strategy.py` handles IBKR TWS connection, signal calculation, order placement, and state writing.
 * **Frontend (Viewer)**: `app.py` (Streamlit) reads the state file, visualizes PnL, and sends commands.
 
 
+* **Live Trading Interface**: Real-time visualization of the connection to Interactive Brokers (IBKR), showing active positions, PnL, and system logs.
+<img src="images/live_trading_ibkr.png" alt="Live Trading Interface with IBKR Connection" width="800"/>
 * **IPC Communication**: Inter-process communication based on `dashboard_state.json` and `command.json`.
 * **Emergency Control**: Supports **STOP (Emergency Stop)**, **FLAT (Liquidate All)**, and **CANCEL (Cancel Open Orders)** commands.
 
-#### 🏭 Engineering Architecture
+#### Engineering Architecture
 
 * **Strategy Factory**: `@register_strategy` decorator enables automatic strategy registration, allowing extension without modifying the engine code.
 * **Configuration Center**: Multi-layer merging mechanism: `base.yaml` (Base) + `backtest/live.yaml` (Environment) + `secrets.yaml` (Credentials).
@@ -51,7 +66,7 @@ This project is an **industrial-grade, full-stack** quantitative trading system 
 
 ### 3. System Architecture
 
-#### 🔄 Mode A: Backtesting
+#### Mode A: Backtesting
 
 ```mermaid
 graph LR
@@ -64,7 +79,7 @@ graph LR
 
 ```
 
-#### 🔴 Mode B: Live Trading
+#### Mode B: Live Trading
 
 ```mermaid
 graph TD
@@ -87,7 +102,7 @@ graph TD
 
 ### 4. File Manifest
 
-#### 📂 Root Directory
+#### Root Directory
 
 * **`run_backtest.py`**: **[Backtest Entry]**
 * Command-line tool. Loads `backtest.yaml`, initializes the engine, runs the simulation, and saves results.
@@ -99,9 +114,9 @@ graph TD
 
 * **`app.py`**: **[All-in-One Console]**
 * Streamlit Web Application. Includes **four** main modules:
-1. **🔴 Live Dashboard**: Live trading monitor (reads backend state, sends commands).
-2. **🌍 Market Overview**: Global market heatmaps and real-time news aggregation.
-3. **🔍 Stock Deep Dive**: Technical charts and fundamental/sentiment analysis for individual assets.
+1. **Live Dashboard**: Live trading monitor (reads backend state, sends commands).
+2. **Market Overview**: Global market heatmaps and real-time news aggregation.
+3. **Stock Deep Dive**: Technical charts and fundamental/sentiment analysis for individual assets.
 4. **Strategy Explorer**: Visualization for backtesting and factor analysis.
 
 
@@ -116,7 +131,7 @@ graph TD
 
 
 
-#### 📂 config (Configuration Center)
+#### config (Configuration Center)
 
 * **`__init__.py`**: **[Config Loader]**
 * Logic for merging `base` + `env` + `secrets` configuration files.
@@ -127,7 +142,7 @@ graph TD
 * **`live.yaml`**: Live-specific params (IB port, Risk thresholds).
 * **`secrets.yaml`**: Sensitive info (Email passwords, Telegram tokens, **Finnhub API Keys**). **Ignored by Git**.
 
-#### 📂 quant_core (Core Library)
+#### quant_core (Core Library)
 
 * **`quant_core/backtest_engine.py`**: Event-driven engine handling time slicing, data loading, and scheduling Strategy/Portfolio.
 * **`quant_core/portfolio.py`**: Ledger managing cash, positions, and NAV. Features stateless design and hard constraints.
@@ -170,7 +185,7 @@ python run_live_strategy.py
 
 ```
 
-*Keep this window open after seeing `👁️ ...Entering Live Monitor Mode`.*
+*Keep this window open after seeing `...Entering Live Monitor Mode`.*
 
 **Step 2: Start Frontend Dashboard (Terminal B)**
 *UI display, can be closed/restarted anytime.*
@@ -181,7 +196,7 @@ streamlit run app.py
 
 ```
 
-* Select **"🔴 Live Dashboard"** in the sidebar.
+* Select **"Live Dashboard"** in the sidebar.
 * Toggle **Auto-Refresh** on.
 
 ---
@@ -190,13 +205,21 @@ streamlit run app.py
 
 In the **Live Dashboard**, you have three emergency buttons:
 
-* **🚫 CANCEL**: Cancels all **Open Orders** (Submitted but not filled). Useful when you want to replace orders.
-* **📉 FLAT**: Liquidates all positions at **Market Price (MKT)** and converts to cash. Useful for extreme risk aversion.
-* **🛑 STOP**: Forcefully terminates the backend `run_live_strategy.py` process. **Note: This does NOT cancel orders or liquidate positions; it only stops the program logic.**
+* **CANCEL**: Cancels all **Open Orders** (Submitted but not filled). Useful when you want to replace orders.
+* **FLAT**: Liquidates all positions at **Market Price (MKT)** and converts to cash. Useful for extreme risk aversion.
+* **STOP**: Forcefully terminates the backend `run_live_strategy.py` process. **Note: This does NOT cancel orders or liquidate positions; it only stops the program logic.**
 
 ---
 
+<div id="chinese"></div>
+
 ## 中文
+
+### 项目展示与演示视频
+
+本视频展示了系统的架构设计以及连接盈透证券（IBKR）进行实盘交易的完整工作流。
+
+> *点击上方图片即可在 YouTube 观看完整介绍。*
 
 ### 1. 项目愿景 (Project Vision)
 
@@ -212,28 +235,31 @@ In the **Live Dashboard**, you have three emergency buttons:
 
 ### 2. 核心特性 (Key Features)
 
-#### 📊 回测引擎 (Backtest Engine V5)
+#### 回测引擎 (Backtest Engine V5)
 
 * **双重价格机制**：模拟 T-1 收盘决策（定份额），T 日开盘执行（算资金）。
 * **资金风控**：内置 **2% 现金缓冲 (Cash Buffer)**，防止满仓波动导致透支。
 * **硬约束撮合**：执行时实时检查现金流，若遇跳空高开导致资金不足，自动执行 **Order Truncation (砍单)**。
 
-#### 🌍 市场情报系统 (Market Intelligence UI) - 新增
+#### 市场情报系统 (Market Intelligence UI)
 
 * **全球市场概览**：集成 **TradingView** 组件（行情条、板块热力图）与 **Finnhub** AI 筛选的实时新闻流，提供宏观市场视角。
+<img src="images/market_overview.png" alt="全球市场概览" width="800"/>
 * **个股深度分析**：提供全屏级 **高级实时 K 线图** 与 **内部交易情绪 (Insider Sentiment)** 分析（基于 Plotly 可视化管理层信心）。
 
-#### 🔴 实盘指挥舱 (Live Cockpit)
+#### 实盘指挥舱 (Live Cockpit)
 
 * **前后端分离**：
 * **后台 (Worker)**：`run_live_strategy.py` 负责连接 TWS、计算信号、下单、写入状态。
 * **前台 (Viewer)**：`app.py` (Streamlit) 负责读取状态、可视化展示 PnL、发送指令。
 
 
+* **实盘交易界面**：实时展示与盈透证券 (IBKR) 的连接状态、当前持仓、未实现盈亏及系统日志。
+<img src="images/live_trading_ibkr.png" alt="连接 IBKR 的实盘交易界面" width="800"/>
 * **IPC 通信**：基于 `dashboard_state.json` 和 `command.json` 实现进程间通信。
 * **应急控制**：支持 **STOP (急停)**、**FLAT (一键清仓)**、**CANCEL (撤销挂单)** 三大指令。
 
-#### 🏭 工程化架构
+#### 工程化架构
 
 * **策略工厂**：`@register_strategy` 装饰器实现策略自动注册，无需修改引擎代码即可扩展。
 * **配置中心**：`base.yaml` (基础) + `backtest/live.yaml` (环境) + `secrets.yaml` (隐私) 的多层合并机制。
@@ -243,7 +269,7 @@ In the **Live Dashboard**, you have three emergency buttons:
 
 ### 3. 系统架构图 (System Architecture)
 
-#### 🔄 模式 A: 离线回测 (Backtesting)
+#### 模式 A: 离线回测 (Backtesting)
 
 ```mermaid
 graph LR
@@ -256,7 +282,7 @@ graph LR
 
 ```
 
-#### 🔴 模式 B: 实盘监控 (Live Trading)
+#### 模式 B: 实盘监控 (Live Trading)
 
 ```mermaid
 graph TD
@@ -279,7 +305,7 @@ graph TD
 
 ### 4. 文件结构详解 (File Manifest)
 
-#### 📂 根目录 (Root)
+#### 根目录 (Root)
 
 * **`run_backtest.py`**: **[回测入口]**
 * 命令行回测工具。加载 `backtest.yaml`，初始化引擎，运行回测并保存结果。
@@ -291,9 +317,9 @@ graph TD
 
 * **`app.py`**: **[全能控制台]**
 * Streamlit Web 应用。包含**四个**核心模块：
-1. **🔴 Live Dashboard**: 实盘监控看板（读取后台状态、发送控制指令）。
-2. **🌍 Market Overview**: 全球市场热力图与实时新闻聚合。
-3. **🔍 Stock Deep Dive**: 个股技术面（K线）与基本面（情绪）深度分析。
+1. **Live Dashboard**: 实盘监控看板（读取后台状态、发送控制指令）。
+2. **Market Overview**: 全球市场热力图与实时新闻聚合。
+3. **Stock Deep Dive**: 个股技术面（K线）与基本面（情绪）深度分析。
 4. **Strategy Explorer**: 策略回测与因子分析可视化。
 
 
@@ -308,7 +334,7 @@ graph TD
 
 
 
-#### 📂 config (配置中心)
+#### config (配置中心)
 
 * **`__init__.py`**: **[配置加载器]**
 * 负责合并 `base` + `env` + `secrets` 配置文件的逻辑。
@@ -319,7 +345,7 @@ graph TD
 * **`live.yaml`**: 实盘专用参数（IB 端口、实盘风控阈值）。
 * **`secrets.yaml`**: 敏感信息（邮件服务器密码，Telegram Token，**Finnhub API Keys**）。**不上传 Git**。
 
-#### 📂 quant_core (核心代码库)
+#### quant_core (核心代码库)
 
 * **`quant_core/backtest_engine.py`** (回测引擎): 事件驱动引擎。负责时间切片、数据加载、以及调度 Strategy 和 Portfolio。实现了 T-1 信号与 T 日执行的时间错位模拟。
 * **`quant_core/portfolio.py`** (账户账本): 管理现金、持仓、计算净值。**无状态设计**（不持有全量历史数据，只处理 Engine 传入的单日价格）。实现了 **2% Cash Buffer** 和 **资金不足自动砍单**。
@@ -362,7 +388,7 @@ python run_live_strategy.py
 
 ```
 
-*看到 `👁️ ...进入实时监控模式` 后，保持窗口开启。*
+*看到 `...进入实时监控模式` 后，保持窗口开启。*
 
 **步骤 2：启动前台监控看板 (Terminal B)**
 *负责显示 UI，可以随时关闭重启。*
@@ -373,7 +399,7 @@ streamlit run app.py
 
 ```
 
-* 在浏览器中选择左侧 **"🔴 Live Dashboard"**。
+* 在浏览器中选择左侧 **"Live Dashboard"**。
 * 开启 **Auto-Refresh** 开关。
 
 ---
@@ -382,9 +408,9 @@ streamlit run app.py
 
 在 **Live Dashboard** 中，你可以看到三个紧急按钮：
 
-* **🚫 CANCEL (撤单)**: 撤销所有**已提交但未成交**的挂单 (Open Orders)。适用于下单价格不合适想重下的情况。
-* **📉 FLAT (清仓)**: 以**市价 (MKT)** 卖出账户内所有持仓，变现为现金。适用于极端行情避险。
-* **🛑 STOP (急停)**: 强制终止后台 `run_live_strategy.py` 进程。**注意：这不会撤单也不会平仓，只是让程序停止思考。**
+* **CANCEL (撤单)**: 撤销所有**已提交但未成交**的挂单 (Open Orders)。适用于下单价格不合适想重下的情况。
+* **FLAT (清仓)**: 以**市价 (MKT)** 卖出账户内所有持仓，变现为现金。适用于极端行情避险。
+* **STOP (急停)**: 强制终止后台 `run_live_strategy.py` 进程。**注意：这不会撤单也不会平仓，只是让程序停止思考。**
 
 ---
 
