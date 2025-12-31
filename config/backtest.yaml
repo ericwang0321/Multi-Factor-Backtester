@@ -1,4 +1,17 @@
 # config/backtest.yaml
+# ==========================================
+# 1. 回测环境配置 (Backtest Context)
+# ==========================================
+backtest:
+  start_date: '2018-01-01'
+  end_date: '2024-07-31'
+  initial_capital: 1000000
+  commission_rate: 0.0010
+  slippage: 0.0005
+  benchmark: 'SPY'
+  
+  # 选项: 'us_stock_top' (美股) / 'equity_us' (ETF) / 'All'
+  universe: 'us_stock_top'
 
 # ==========================================
 # 2. 策略覆盖 (完全独立于回测)

@@ -135,6 +135,9 @@ if __name__ == '__main__':
     START_DATE = bt_conf.get('start_date', '2018-01-01')
     END_DATE = bt_conf.get('end_date', '2024-07-31')
     
+    # [新增] 读取 Universe 设置 (默认为 'All')
+    TARGET_UNIVERSE = bt_conf.get('universe', 'All')
+
     # 解析路径
     DATA_HOME = config.get('data_home', 'data/processed')
     PRICE_PATH = os.path.join(DATA_HOME, 'all_price_data.parquet')
@@ -151,10 +154,19 @@ if __name__ == '__main__':
 
     helper = DataQueryHelper(storage_path=PRICE_PATH)
     
-    # 获取资产池
+    # [新增] 根据 Universe 过滤资产池
+    print(f"🎯 正在加载资产池: {TARGET_UNIVERSE}")
     universe_df = helper.get_all_symbols()
+    
+    if TARGET_UNIVERSE != 'All':
+        if 'category_id' in universe_df.columns:
+            # 筛选 category_id 匹配的资产
+            universe_df = universe_df[universe_df['category_id'] == TARGET_UNIVERSE]
+        else:
+            print("⚠️ 警告: 数据中缺少 category_id 列，无法按 Universe 筛选，回退到 All。")
+
     universe_codes = universe_df['sec_code'].tolist()
-    print(f"✅ 基础数据加载完成。总标的数: {len(universe_df)}")
+    print(f"✅ 基础数据加载完成。本次回测标的数: {len(universe_codes)}")
 
     # -----------------------------------------------------------
     # 3. 初始化策略 (工厂模式)
@@ -216,7 +228,7 @@ if __name__ == '__main__':
         config=ENGINE_CONFIG,
         strategy=strategy,
         query_helper=helper,
-        universe_to_run='All' 
+        universe_to_run=TARGET_UNIVERSE # [修改] 传入筛选后的 universe
     )
     
     # 运行回测
@@ -269,7 +281,7 @@ if __name__ == '__main__':
     plt.plot(strat_norm, label='Strategy', linewidth=2, color='#1f77b4')
     plt.plot(bench_norm, label=f"Benchmark ({bench_symbol})", linestyle='--', alpha=0.7, color='#ff7f0e')
     
-    plt.title(f"Backtest: {strategy.name}")
+    plt.title(f"Backtest: {strategy.name} (Universe: {TARGET_UNIVERSE})") # [修改] 标题显示 Universe
     plt.xlabel("Date")
     plt.ylabel("Normalized Equity")
     plt.legend(loc='upper left')

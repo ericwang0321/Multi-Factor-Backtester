@@ -450,8 +450,47 @@ with st.sidebar:
 
     if app_mode == "Strategy Explorer":
         st.header("Parameters")
-        bench_options = {"S&P 500 (SPY)": "SPY", "Global Equity (ACWI)": "ACWI", "Global Bond (AGG)": "AGG", "Commodities (GSG)": "GSG"}
-        selected_bench_label = st.selectbox("Compare against Benchmark", list(bench_options.keys()))
+        
+        # --- [修改] 三级选择逻辑 ---
+        # 选项 1: Specific ETF Sector
+        # 选项 2: All ETFs (Excluding US Stocks)
+        # 选项 3: All US Stocks (Only us_stock_top)
+        
+        universe_type = st.selectbox(
+            "Select Universe Type", 
+            ["Specific ETF Sector", "All ETFs (Broad Market)", "All US Stocks (Top Liquid)"]
+        )
+        
+        # 获取所有资产信息
+        all_assets_df = helper.get_all_symbols()
+        # 找出所有 ETF 的组 (排除 'us_stock_top')
+        etf_groups = sorted([g for g in all_assets_df['category_id'].unique() if g != 'us_stock_top'])
+
+        # 根据选择确定 target_universe_list
+        target_universe_list = [] # 最终要传给回测的列表
+
+        if universe_type == "Specific ETF Sector":
+            # 二级选择框：具体选哪个 ETF 板块
+            selected_sector = st.selectbox("Select ETF Sector", etf_groups)
+            # 过滤出该板块的股票
+            target_universe_list = all_assets_df[all_assets_df['category_id'] == selected_sector]['sec_code'].tolist()
+            
+        elif universe_type == "All ETFs (Broad Market)":
+            # 所有非 us_stock_top 的都是 ETF
+            target_universe_list = all_assets_df[all_assets_df['category_id'] != 'us_stock_top']['sec_code'].tolist()
+            
+        elif universe_type == "All US Stocks (Top Liquid)":
+            # 只有 us_stock_top 是个股
+            target_universe_list = all_assets_df[all_assets_df['category_id'] == 'us_stock_top']['sec_code'].tolist()
+        
+        # 显示当前选了多少只股票
+        st.caption(f"Selected Assets: {len(target_universe_list)} tickers")
+        # --------------------------------
+
+        col_u2 = st.columns(1)[0]
+        with col_u2:
+             bench_options = {"S&P 500 (SPY)": "SPY", "Global Equity (ACWI)": "ACWI", "Global Bond (AGG)": "AGG", "Commodities (GSG)": "GSG"}
+             selected_bench_label = st.selectbox("Compare against Benchmark", list(bench_options.keys()))
         
         runner_temp = get_analysis_runner(helper)
         available_factors = sorted(list(runner_temp.factor_engine.FACTOR_REGISTRY.keys()))
@@ -522,44 +561,50 @@ elif app_mode == "Strategy Explorer":
         else:
             try:
                 bt_config = {'INITIAL_CAPITAL': 1000000, 'COMMISSION_RATE': comm_rate, 'SLIPPAGE': slip_rate, 'REBALANCE_DAYS': rebalance_days}
-                u_df = helper.get_all_symbols()
-                universe_codes = u_df['sec_code'].tolist()
                 
-                f_engine = get_factor_engine(helper)
-                factor_data = prepare_factor_data_for_strategy(f_engine, universe_codes, selected_factors, start_date, end_date)
-                
-                if factor_data.empty:
-                    st.error("No factor data generated.")
+                # [核心逻辑] 使用之前计算好的 target_universe_list
+                # ----------------------------------------------------
+                if not target_universe_list:
+                    st.error("Universe is empty! Please check your data.")
                 else:
-                    # 使用工厂模式或原有逻辑
-                    strategy = LinearWeightedStrategy(name="App_Strat", weights=factor_weights, top_k=top_k, 
-                                                      stop_loss_pct=stop_loss_pct, max_pos_weight=max_pos_weight, max_drawdown_pct=max_drawdown_pct)
-                    strategy.load_data(factor_data)
-                    
-                    engine = BacktestEngine(start_date=start_date.strftime('%Y-%m-%d'), end_date=end_date.strftime('%Y-%m-%d'), 
-                                            config=bt_config, strategy=strategy, query_helper=helper)
-                    
-                    with st.spinner('Running simulation...'):
-                        equity_df, final_portfolio = engine.run()
+                    st.toast(f"Backtesting on {len(target_universe_list)} assets...")
 
-                    bench_symbol = bench_options[selected_bench_label]
-                    b_rets = helper.get_benchmark_returns(bench_symbol)
-                    if not b_rets.empty:
-                        b_rets = b_rets.loc[pd.Timestamp(start_date):pd.Timestamp(end_date)]
-                        benchmark_equity = (1 + b_rets).cumprod() * bt_config['INITIAL_CAPITAL']
-                        benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill').fillna(bt_config['INITIAL_CAPITAL'])
-                    else:
-                        benchmark_equity = pd.Series(bt_config['INITIAL_CAPITAL'], index=equity_df.index)
-                        
-                    metrics = calculate_extended_metrics(equity_df['total_value'], benchmark_equity, final_portfolio)
+                    f_engine = get_factor_engine(helper)
+                    # 将计算出的 target_universe_list 传进去
+                    factor_data = prepare_factor_data_for_strategy(f_engine, target_universe_list, selected_factors, start_date, end_date)
                     
-                    st.session_state.bt_ready = True
-                    st.session_state.metrics = metrics
-                    st.session_state.equity_df = equity_df
-                    st.session_state.strategy = strategy
-                    st.session_state.final_portfolio = final_portfolio
-                    st.session_state.engine = engine
-                    st.session_state.bench_label = selected_bench_label
+                    if factor_data.empty:
+                        st.error("No factor data generated.")
+                    else:
+                        # 使用工厂模式或原有逻辑
+                        strategy = LinearWeightedStrategy(name="App_Strat", weights=factor_weights, top_k=top_k, 
+                                                          stop_loss_pct=stop_loss_pct, max_pos_weight=max_pos_weight, max_drawdown_pct=max_drawdown_pct)
+                        strategy.load_data(factor_data)
+                        
+                        engine = BacktestEngine(start_date=start_date.strftime('%Y-%m-%d'), end_date=end_date.strftime('%Y-%m-%d'), 
+                                                config=bt_config, strategy=strategy, query_helper=helper)
+                        
+                        with st.spinner('Running simulation...'):
+                            equity_df, final_portfolio = engine.run()
+
+                        bench_symbol = bench_options[selected_bench_label]
+                        b_rets = helper.get_benchmark_returns(bench_symbol)
+                        if not b_rets.empty:
+                            b_rets = b_rets.loc[pd.Timestamp(start_date):pd.Timestamp(end_date)]
+                            benchmark_equity = (1 + b_rets).cumprod() * bt_config['INITIAL_CAPITAL']
+                            benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill').fillna(bt_config['INITIAL_CAPITAL'])
+                        else:
+                            benchmark_equity = pd.Series(bt_config['INITIAL_CAPITAL'], index=equity_df.index)
+                            
+                        metrics = calculate_extended_metrics(equity_df['total_value'], benchmark_equity, final_portfolio)
+                        
+                        st.session_state.bt_ready = True
+                        st.session_state.metrics = metrics
+                        st.session_state.equity_df = equity_df
+                        st.session_state.strategy = strategy
+                        st.session_state.final_portfolio = final_portfolio
+                        st.session_state.engine = engine
+                        st.session_state.bench_label = selected_bench_label
             
             except Exception as e:
                 st.error(f"Runtime Error: {str(e)}")

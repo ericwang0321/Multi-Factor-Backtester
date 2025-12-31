@@ -3,6 +3,11 @@
 # ==========================================
 # 1. 实盘环境特有参数
 # ==========================================
+live:
+  # 这里的名字必须对应 setup_stock_universe.py 生成的 csv 里的 category_id
+  # 选项: 'us_stock_top' (美股) / 'equity_us' (ETF) / 'All'
+  universe: 'us_stock_top'
+
 ib_connection:
   host: '127.0.0.1'
   port: 7497
