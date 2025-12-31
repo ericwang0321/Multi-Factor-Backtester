@@ -37,10 +37,9 @@ strategy:
   # 如果 type 是 linear，工厂会读取这里
   linear_params:
     weights:
-      alpha013: 0.6
-      rsi: 0.4
+      momemtum: 1
 
   # 如果 type 改成 ml，工厂会读取这里
   ml_params:
     model_path: 'models/prod_model_v1.pkl'
-    feature_list: ['alpha013', 'rsi']
+    feature_list: ['momemtum', 'rsi']

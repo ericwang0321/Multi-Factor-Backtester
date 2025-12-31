@@ -1,9 +1,9 @@
 {
-  "total_equity": 134805.94,
+  "total_equity": 134702.66,
   "unrealized_pnl": 0.0,
   "positions": {},
   "avg_costs": {},
   "status": "Running (Auto)",
-  "next_run": "2025-12-30 09:15:00-05:00",
-  "updated_at": "2025-12-30 11:14:17"
+  "next_run": "2025-12-31 09:15:00-05:00",
+  "updated_at": "2025-12-31 18:32:54"
 }

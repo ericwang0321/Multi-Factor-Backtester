@@ -89,6 +89,7 @@ Pygments==2.19.2
 pyluach==2.3.0
 pyparsing==3.2.5
 python-dateutil==2.9.0.post0
+python-telegram-bot==22.5
 pytz==2025.2
 PyYAML==6.0.3
 pyzmq==27.1.0
